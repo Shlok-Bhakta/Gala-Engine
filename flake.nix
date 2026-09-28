@@ -18,7 +18,7 @@
       packages = eachSystem (pkgs: {
         default = pkgs.writeShellApplication {
           name = "gala";
-          runtimeInputs = [ pkgs.openssh pkgs.rsync pkgs.python3 ] ++ deviceTools pkgs;
+          runtimeInputs = [ pkgs.openssh pkgs.rsync pkgs.python3 pkgs.curl ] ++ deviceTools pkgs;
           text = ''exec ${pkgs.python3}/bin/python3 ${./bin/gala} "$@"'';
         };
       });

@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 import uuid
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -69,6 +70,9 @@ def project_paths(options):
                              capture_output=True, text=True, check=False)
         relative = os.path.relpath(source, top.stdout.strip()) if top.returncode == 0 else source.name
         identity = f"{origin.stdout.strip()}/{relative}"
+    # Each client owns its mirror: simultaneous syncs from different machines must
+    # not change the source tree underneath another client's queued build.
+    identity = f"{os.uname().nodename}/{identity}/{source}"
     suffix = hashlib.sha256(identity.encode()).hexdigest()[:8]
     name = options.name or f"{stem}-{suffix}"
     if not SAFE_NAME.fullmatch(name):
@@ -252,18 +256,18 @@ def inspect_ipas(run_dir):
     return artifacts
 
 
-def worker_build(project, job):
+def worker_job(project, job, kind):
     project = Path(project)
     if not re.fullmatch(r"[0-9TZ-]+[a-f0-9]{6}", job):
         fail("Invalid job ID")
     run_dir = project / "runs" / job
     run_dir.mkdir(parents=True, exist_ok=False)
-    log_path = run_dir / "build.log"
-    recipe = project / "source" / "ios-build.sh"
+    log_path = run_dir / f"{kind}.log"
+    recipe = project / "source" / f"ios-{kind}.sh"
     if not recipe.is_file():
         message = f"Missing recipe: {recipe}"
         log_path.write_text(message + "\n")
-        (run_dir / "result.json").write_text(json.dumps({"job": job, "exit_code": 1, "artifacts": []}) + "\n")
+        (run_dir / "result.json").write_text(json.dumps({"job": job, "kind": kind, "exit_code": 1, "artifacts": []}) + "\n")
         print(message, file=sys.stderr)
         return 1
     env = os.environ.copy()
@@ -286,20 +290,28 @@ def worker_build(project, job):
             print(line, end="", flush=True)
         code = process.wait()
     artifacts = []
-    if code == 0:
+    if code == 0 and kind == "build":
         try:
             artifacts = inspect_ipas(run_dir)
         except (RuntimeError, OSError, zipfile.BadZipFile) as error:
             code = 1
             with open(log_path, "a") as log:
                 log.write(f"IPA validation failed: {error}\n")
-    if code == 0 and not artifacts:
+    if code == 0 and kind == "build" and not artifacts:
         code = 1
         with open(log_path, "a") as log:
             log.write("Recipe exited successfully but produced no IPA\n")
-    manifest = {"job": job, "exit_code": code, "artifacts": artifacts}
+    manifest = {"job": job, "kind": kind, "exit_code": code, "artifacts": artifacts}
     (run_dir / "result.json").write_text(json.dumps(manifest, indent=2) + "\n")
     return code
+
+
+def worker_build(project, job):
+    return worker_job(project, job, "build")
+
+
+def worker_test(project, job):
+    return worker_job(project, job, "test")
 
 
 def mac_service(root):
@@ -337,8 +349,8 @@ def mac_service(root):
                 elif method == "POST" and len(pieces) == 2 and pieces[0] == "prepare" and SAFE_NAME.fullmatch(pieces[1]):
                     worker_prepare(root / "projects" / pieces[1])
                     self.respond(200, {"prepared": pieces[1]})
-                elif method == "POST" and len(pieces) == 3 and pieces[0] == "build" and SAFE_NAME.fullmatch(pieces[1]):
-                    code = worker_build(root / "projects" / pieces[1], pieces[2])
+                elif method == "POST" and len(pieces) == 3 and pieces[0] in ("build", "test") and SAFE_NAME.fullmatch(pieces[1]):
+                    code = worker_job(root / "projects" / pieces[1], pieces[2], pieces[0])
                     self.respond(200, {"exit_code": code})
                 else:
                     self.respond(404, {"error": "unknown request"})
@@ -360,7 +372,7 @@ def mac_service(root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
-    for action in ("doctor", "sync", "build", "run"):
+    for action in ("doctor", "sync", "test", "build", "run", "deliver"):
         cmd = sub.add_parser(action)
         cmd.add_argument("--host", default=os.environ.get("GALA_HOST", "macbook"))
         cmd.add_argument("--root", default=os.environ.get("GALA_REMOTE_ROOT", DEFAULT_ROOT))
@@ -372,6 +384,10 @@ def main():
             cmd.add_argument("--udid", help="select a device when more than one is connected")
             cmd.add_argument("--p12", help="Apple development certificate and private key")
             cmd.add_argument("--profile", help="matching .mobileprovision file")
+        if action in ("build", "run"):
+            cmd.add_argument("--gate", action="store_true", help="require ios-test.sh to pass before building")
+    publish = sub.add_parser("publish", help="upload an unsigned IPA and print an Autoloader link")
+    publish.add_argument("ipa", nargs="?", help="IPA path; defaults to latest Gala Engine build")
     service = sub.add_parser("mac-service", help="run the Mac-side build and rsync service")
     service.add_argument("--root", default=os.environ.get("GALA_REMOTE_ROOT", DEFAULT_ROOT))
     device = sub.add_parser("device", help="list, pair, and inspect USB iPhone/iPad devices")
@@ -382,10 +398,10 @@ def main():
     deploy.add_argument("--udid", help="select a device when more than one is connected")
     deploy.add_argument("--p12", help="Apple development certificate and private key")
     deploy.add_argument("--profile", help="matching .mobileprovision file")
-    for action in ("worker-prepare", "worker-build"):
+    for action in ("worker-prepare", "worker-build", "worker-test"):
         cmd = sub.add_parser(action, help=argparse.SUPPRESS)
         cmd.add_argument("project")
-        if action == "worker-build":
+        if action != "worker-prepare":
             cmd.add_argument("job")
     options = parser.parse_args(['run'] if len(sys.argv) == 1 else None)
     try:
@@ -395,43 +411,83 @@ def main():
             worker_prepare(options.project)
         elif options.action == "worker-build":
             return worker_build(options.project, options.job)
+        elif options.action == "worker-test":
+            return worker_test(options.project, options.job)
         elif options.action == "mac-service":
             mac_service(options.root)
         elif options.action == "device":
             device_action(options)
         elif options.action == "deploy":
             client_deploy(options)
+        elif options.action == "publish":
+            client_publish(options)
         else:
             validate_options(options)
             source, _, remote_project = project_paths(options)
-            prepare(options, remote_project)
-            sync(options, source, remote_project)
-            if options.action in ("build", "run") and not options.dry_run:
-                # The source is already synced, so skip the duplicate sync in client_build.
-                client_build_after_sync(options, source, remote_project)
-                if options.action == "run":
-                    options.ipa = None
-                    client_deploy(options)
+            lock_dir = source / ".gala"
+            lock_dir.mkdir(exist_ok=True)
+            with open(lock_dir / "client.lock", "w") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                prepare(options, remote_project)
+                sync(options, source, remote_project)
+                if options.action in ("test", "build", "run", "deliver") and not options.dry_run:
+                    if options.action in ("test", "deliver") or getattr(options, "gate", False):
+                        client_job_after_sync(options, source, remote_project, "test")
+                    if options.action in ("build", "run", "deliver"):
+                        client_job_after_sync(options, source, remote_project, "build")
+                    if options.action == "run":
+                        options.ipa = None
+                        client_deploy(options)
+                    elif options.action == "deliver":
+                        options.ipa = None
+                        client_publish(options)
     except (RuntimeError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, zipfile.BadZipFile) as error:
         print(f"gala: {error}", file=sys.stderr)
         return 1
     return 0
 
 
-def client_build_after_sync(options, source, remote_project):
+def client_job_after_sync(options, source, remote_project, kind):
     job = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6]
-    print(f"Building on {options.host} (job {job})", flush=True)
-    result = service_request(options.host, "POST", f"build/{remote_project.rsplit('/', 1)[-1]}/{job}", check=False)
+    print(f"Running {kind} on {options.host} (job {job})", flush=True)
+    result = service_request(options.host, "POST", f"{kind}/{remote_project.rsplit('/', 1)[-1]}/{job}", check=False)
     destination = source / ".gala" / "runs" / job
     destination.mkdir(parents=True, exist_ok=True)
-    rsync_command(options, "-a", daemon_url(f"{remote_project}/runs/{job}/"), f"{destination}/")
+    try:
+        rsync_command(options, "-a", daemon_url(f"{remote_project}/runs/{job}/"), f"{destination}/")
+    except subprocess.CalledProcessError:
+        fail(f"Mac {kind} service failed before returning a result (HTTP exit {result.returncode})")
     manifest = json.loads((destination / "result.json").read_text())
-    print(f"Build log: {destination / 'build.log'}")
+    print(f"{kind.title()} log: {destination / f'{kind}.log'}")
     for artifact in manifest["artifacts"]:
         print(f"IPA: {destination / artifact['path']}")
         print(f"SHA-256: {artifact['sha256']}")
     if result.returncode or manifest["exit_code"]:
-        fail(f"Build failed; inspect {destination / 'build.log'}")
+        fail(f"{kind.title()} failed; inspect {destination / f'{kind}.log'}")
+
+
+def client_publish(options):
+    ipa = Path(options.ipa).expanduser().resolve() if options.ipa else latest_ipa()
+    if not ipa.is_file() or ipa.suffix.lower() != ".ipa":
+        fail(f"IPA not found: {ipa}")
+    with zipfile.ZipFile(ipa) as archive:
+        if archive.testzip() or not any(name.startswith("Payload/") and ".app/" in name for name in archive.namelist()):
+            fail(f"Invalid IPA: {ipa}")
+    if not shutil.which("curl"):
+        fail("Missing curl; it is needed to upload IPAs")
+    response = checked(["curl", "--fail-with-body", "-sS", "-H", "Content-Type: application/octet-stream",
+                        "--data-binary", f"@{ipa}", "https://planista.shloklab.us/"],
+                       capture_output=True, text=True)
+    url = response.stdout.strip()
+    if not url.startswith("https://planista.shloklab.us/"):
+        fail(f"Unexpected upload response: {url}")
+    link = "https://marginally-better-apps.github.io/Autoloader/?url=" + urllib.parse.quote(url, safe="")
+    with ipa.open("rb") as content:
+        digest = hashlib.file_digest(content, "sha256").hexdigest()
+    (ipa.parent / "publish.json").write_text(json.dumps({"ipa": ipa.name, "sha256": digest,
+                                                       "url": url, "autoloader": link}, indent=2) + "\n")
+    print(f"IPA URL: {url}")
+    print(f"Autoloader: {link}")
 
 
 if __name__ == "__main__":

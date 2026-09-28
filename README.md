@@ -1,6 +1,6 @@
 # Gala Engine
 
-Build unsigned iPhone and iPad IPAs on a Mac while working on Linux. Gala Engine syncs a project to the Mac's bulk volume, runs its `ios-build.sh` there, and copies the IPA and build log back. Tailscale supplies the private network; Gala Engine uses your existing SSH setup.
+Build unsigned iPhone and iPad IPAs on a Mac while working on Linux. Gala Engine syncs a project to the Mac's bulk volume, runs its `ios-build.sh` there, and copies the IPA and build log back. Tailscale supplies the private network; Gala Engine uses your existing SSH setup. It can also run project tests and publish an IPA for Autoloader.
 
 Gala Engine is deliberately small. A Mac-side worker owns the build volume and listens only on `127.0.0.1`; SSH carries its control calls and rsync traffic. There is no account, web UI, simulator, or GitHub push in the build path. It builds the files in your current working tree, including uncommitted edits.
 
@@ -51,7 +51,7 @@ Put one file named `ios-build.sh` at the root of the project. It runs on the Mac
 | Variable | Meaning |
 | --- | --- |
 | `GALA_BUILD_DIR` | Persistent directory for Xcode DerivedData, CMake/Ninja output, and other incremental build data. |
-| `GALA_ARTIFACT_DIR` | Fresh directory for this run. Write one or more unsigned `.ipa` files here. |
+| `GALA_ARTIFACT_DIR` | Fresh directory for this run. Builds write unsigned `.ipa` files here; tests may write reports here. |
 | `GALA_JOBS` | Suggested parallel job count. Defaults to 2 for this Mac. |
 | `GALA_PLATFORM` | `ios`. |
 
@@ -74,7 +74,24 @@ gala build
 
 Results arrive at `.gala/runs/<job-id>/` in the project. Add `.gala/` to the project's `.gitignore`.
 
-The Mac mirror name includes a short hash of the Git remote and the project's path within that repo, so projects with the same directory name do not collide. Use `--name` to choose a fixed mirror name when needed.
+The Mac mirror name includes a short hash of the client hostname, checkout path, Git remote, and the project's path within that repo. Different Linux hosts and checkouts cannot overwrite each other's synced source. A lock also serializes Gala runs from the same checkout. Use `--name` only when deliberately reusing a fixed mirror; sharing a name across active clients can cause a sync collision.
+
+## Test, gate, and publish
+
+For Mac-side tests, add an executable `ios-test.sh` at the same root as `ios-build.sh`. It can run Swift or XCTest unit tests, JavaScript tests, linting, static checks, or custom project commands. It receives the same `GALA_*` variables as the build recipe. Write JUnit XML, coverage, and other reports under `GALA_ARTIFACT_DIR` to retrieve them. It does not need to produce an IPA.
+
+```sh
+gala test              # sync, run ios-test.sh, return test.log and reports
+gala build --gate      # test must pass before building
+gala run --gate        # ThinkPad: test, build, sign, and upgrade over USB
+gala deliver           # crabcake: test, build, upload IPA, print Autoloader link
+```
+
+`gala deliver` is the one-command agent path on crabcake. It requires `ios-test.sh`; a missing or failing test prevents the build and upload. Each step has its own `.gala/runs/<job-id>/` directory with a log and `result.json`. A recipe failure returns a nonzero CLI status and the log path. Agents should read the full log, fix the cause, and retry. A successful test step only proves what that project's test script actually checks. The SwiftTodo example currently checks iOS Swift type correctness and bundle identity; the owner separately confirmed its task UI on a physical phone.
+
+`gala publish [path/to/unsigned.ipa]` uploads an existing IPA without rebuilding; by default it selects the latest unsigned Gala IPA in the project. It prints a direct HTTPS IPA URL and a tappable Autoloader link, and records them in `publish.json` beside the IPA. Planista uploads are public and unlisted, so run this only for artifacts meant to be shared. Autoloader signs and installs on the user's iPhone or iPad; crabcake needs no USB pairing or signing files. The upload is separate from `gala build`, which keeps ordinary local builds private.
+
+Gala does not run physical iOS UI automation from crabcake. Maestro's iOS flows require an Apple simulator, which this setup intentionally does not use. A pass on `gala test` and `gala build` therefore cannot claim that the app's actual screen or touch flow was verified. The current device check is a human opening the Autoloader build or using `gala run` from the ThinkPad and reporting behavior. Device UI automation needs a future physical-device runner with an attached iPhone or iPad.
 
 For a real minimal UIKit example:
 
