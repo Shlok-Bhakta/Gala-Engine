@@ -32,7 +32,13 @@ tailscale serve --bg --https=443 --set-path=/gala http://127.0.0.1:18732
 
 The LaunchAgent starts when that user logs in after a reboot. The plist sends console output to `/dev/null` because launchd could not open a log file on this USB volume; each build still writes its own log there. If `gala doctor` reports a volume access error, grant `/opt/homebrew/bin/python3` access in System Settings → Privacy & Security → Full Disk Access. The worker keeps its script, configuration, source mirrors, build caches, signed current IPAs, and push subscriptions on the USB volume. It binds rsync to `127.0.0.1:18730`, build control to `127.0.0.1:18731`, and the private install server to `127.0.0.1:18732`. Keep the Tailscale Serve route tailnet only. Do not use Funnel for `/gala`.
 
-For Mac signing, install a valid development or ad hoc profile that includes both devices and a matching certificate with its private key in the Mac keychain. The current wildcard development profile lists two devices and the matching certificate. macOS may ask once to let `codesign` use the private key. Until that authorization succeeds, `gala deliver` cannot produce an installable OTA IPA.
+For Mac signing, install a valid development or ad hoc profile that includes both devices and a matching certificate with its private key in the Mac keychain. The current wildcard development profile lists two devices and the matching certificate. On this Mac, `codesign` currently waits for keychain authorization. You can grant Apple signing tools access to this specific development key from an interactive Mac shell, including an SSH shell, without opening the laptop:
+
+```sh
+security set-key-partition-list -S apple-tool:,apple: -s -t private -l 'Apple Development: ZIYANG CHEN (ZIYANG CHEN)' ~/Library/Keychains/login.keychain-db
+```
+
+Enter the Mac login keychain password at its prompt. Do not put it in a shell argument or send it to an agent. Until that authorization succeeds, `gala deliver` cannot produce an installable OTA IPA.
 
 Clone Gala Engine on the client and enter its Nix shell:
 
