@@ -11,18 +11,89 @@ private struct TodoListView: View {
     @State private var todos: [Todo] = []
     @State private var draft = ""
 
+    private let canvas = Color(red: 0.93, green: 0.96, blue: 0.91)
+    private let forest = Color(red: 0.13, green: 0.31, blue: 0.22)
+    private let coral = Color(red: 0.91, green: 0.47, blue: 0.38)
+
+    private var completedCount: Int {
+        todos.filter(\.isDone).count
+    }
+
+    private var completion: Double {
+        Double(completedCount) / Double(max(todos.count, 1))
+    }
+
+    private var buildNumber: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
+    }
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                HStack {
-                    TextField("New task", text: $draft)
-                        .textInputAutocapitalization(.sentences)
-                        .submitLabel(.done)
-                        .onSubmit(addTodo)
-                    Button("Add", action: addTodo)
+                VStack(alignment: .leading, spacing: 18) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("A fresh start")
+                                .font(.largeTitle.bold())
+                                .foregroundStyle(forest)
+                            Text("Make room for the good stuff.")
+                                .font(.subheadline)
+                                .foregroundStyle(forest.opacity(0.7))
+                        }
+                        Spacer()
+                        Image(systemName: "leaf.fill")
+                            .font(.title2)
+                            .foregroundStyle(forest)
+                            .frame(width: 48, height: 48)
+                            .background(.white, in: RoundedRectangle(cornerRadius: 16))
+                    }
+
+                    VStack(alignment: .leading, spacing: 13) {
+                        HStack(alignment: .firstTextBaseline) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("YOUR PROGRESS")
+                                    .font(.caption2.bold())
+                                    .tracking(1.3)
+                                    .foregroundStyle(.white.opacity(0.72))
+                                Text("\(completedCount) of \(todos.count) tasks finished")
+                                    .font(.headline)
+                                    .foregroundStyle(.white)
+                            }
+                            Spacer()
+                            Text("\(Int(completion * 100))%")
+                                .font(.title2.bold())
+                                .foregroundStyle(.white)
+                        }
+                        ProgressView(value: completion)
+                            .tint(Color(red: 0.76, green: 0.89, blue: 0.58))
+                            .accessibilityLabel("Task completion")
+                            .accessibilityValue("\(completedCount) of \(todos.count) tasks")
+                    }
+                    .padding(20)
+                    .background(forest, in: RoundedRectangle(cornerRadius: 22))
+
+                    HStack(spacing: 12) {
+                        TextField("What needs doing?", text: $draft)
+                            .textInputAutocapitalization(.sentences)
+                            .submitLabel(.done)
+                            .onSubmit(addTodo)
+                        Button(action: addTodo) {
+                            Image(systemName: "plus")
+                                .font(.headline)
+                                .frame(width: 38, height: 38)
+                                .background(coral, in: RoundedRectangle(cornerRadius: 11))
+                                .foregroundStyle(.white)
+                        }
+                        .accessibilityLabel("Add task")
                         .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    .padding(10)
+                    .padding(.leading, 8)
+                    .background(.white, in: RoundedRectangle(cornerRadius: 17))
                 }
-                .padding()
+                .padding(.horizontal, 20)
+                .padding(.top, 20)
+                .padding(.bottom, 12)
 
                 List {
                     ForEach($todos) { $todo in
@@ -31,23 +102,27 @@ private struct TodoListView: View {
                         } label: {
                             HStack {
                                 Image(systemName: todo.isDone ? "checkmark.circle.fill" : "circle")
-                                    .foregroundStyle(todo.isDone ? .green : .secondary)
+                                    .foregroundStyle(todo.isDone ? forest : coral)
                                 Text(todo.title)
                                     .strikethrough(todo.isDone)
                                     .foregroundStyle(.primary)
                             }
                         }
                         .buttonStyle(.plain)
+                        .listRowBackground(Color.white)
                     }
                     .onDelete { todos.remove(atOffsets: $0) }
                 }
+                .scrollContentBackground(.hidden)
                 .overlay {
                     if todos.isEmpty {
-                        ContentUnavailableView("No tasks yet", systemImage: "checklist")
+                        ContentUnavailableView("A clear slate", systemImage: "checklist", description: Text("Add a task above to get started."))
                     }
                 }
             }
-            .navigationTitle("To Do")
+            .background(canvas.ignoresSafeArea())
+            .navigationTitle("SwiftTodo · Build \(buildNumber)")
+            .navigationBarTitleDisplayMode(.inline)
             .onAppear(perform: loadTodos)
             .onChange(of: todos) { _, newValue in
                 if let data = try? JSONEncoder().encode(newValue) {
