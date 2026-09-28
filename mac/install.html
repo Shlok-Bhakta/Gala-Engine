@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#f6f5ef">
+  <title>@TITLE@ · Gala install</title>
+  <style>
+    :root{font:16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#203b2a;background:#f6f5ef;-webkit-font-smoothing:antialiased}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;padding:max(28px,env(safe-area-inset-top)) 20px max(32px,env(safe-area-inset-bottom))}
+    main{max-width:480px;margin:0 auto}.brand{font-size:14px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:#df735a}
+    .hero{margin-top:32px;padding:30px;border-radius:28px;background:#214e39;color:white;box-shadow:0 18px 35px #214e3920}
+    .eyebrow{margin:0 0 10px;color:#c9e9cb;font-size:12px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}
+    h1{margin:0;font-size:clamp(32px,8vw,44px);line-height:1.1;letter-spacing:-.05em}
+    .hero p:last-child{margin:14px 0 0;color:#d9eadb}
+    .card{margin-top:18px;padding:22px;border:1px solid #e5eae1;border-radius:24px;background:white}
+    .card h2{margin:0 0 6px;font-size:20px;letter-spacing:-.035em}.card p{margin:0;color:#687b6e;font-size:14px}
+    #install{display:block;margin-top:20px;padding:15px 18px;border-radius:15px;background:#e87960;color:white;text-align:center;text-decoration:none;font-weight:800}
+    #install:active{transform:scale(.99)}#activity{margin-top:22px}#stage{display:block;margin-bottom:10px;font-weight:750;font-size:14px}
+    .track{height:12px;overflow:hidden;border-radius:99px;background:#e9eee6}.fill{height:100%;width:0;border-radius:inherit;background:#e87960;transition:width .25s}
+    .track.waiting .fill{width:35%;animation:wait 1.5s ease-in-out infinite}
+    @keyframes wait{0%{transform:translateX(-110%)}100%{transform:translateX(290%)}}
+    #detail{margin-top:10px;font-size:13px;line-height:1.5}.help{margin-top:18px!important;line-height:1.55}
+    .help strong{color:#304a37}.footer{margin-top:24px;text-align:center;color:#88998d;font-size:12px}
+    [hidden]{display:none!important}@media(prefers-reduced-motion:reduce){.track.waiting .fill{animation:none;transform:none}}
+    @media(prefers-color-scheme:dark){:root{color:#e7f0e6;background:#14251b}.card{background:#203429;border-color:#344c39}.card p{color:#acc0ae}.track{background:#36513a}.help strong{color:#e7f0e6}}
+  </style>
+</head>
+<body>
+  <main>
+    <div class="brand">Gala Engine ✦ Private install</div>
+    <section class="hero">
+      <p class="eyebrow">Fresh from your Mac</p>
+      <h1>@TITLE@</h1>
+      <p>Build @VERSION@ is ready for your iPhone or iPad.</p>
+    </section>
+    <section class="card">
+      <h2>Install this build</h2>
+      <p>Keep Tailscale connected while iOS downloads the app.</p>
+      <a id="install" href="@INSTALL_URL@">Install update</a>
+      <div id="activity" hidden>
+        <span id="stage" role="status" aria-live="polite">Opening the iOS installer…</span>
+        <div class="track waiting" id="track" role="progressbar" aria-label="IPA transfer" aria-valuemin="0" aria-valuemax="100" aria-valuetext="Waiting for iOS to download">
+          <div class="fill" id="fill"></div>
+        </div>
+        <p id="detail">Gala will show the download it sends to iOS. iOS does not share its final installation progress with this page.</p>
+      </div>
+      <p class="help"><strong>Still seeing the old screen?</strong> After the install finishes, fully close the app and reopen it. The title inside the app shows its build number. Keep the app installed while retrying so its tasks stay on your phone.</p>
+    </section>
+    <div class="footer">Only available on your tailnet</div>
+  </main>
+  <script>
+    const attempt = "@ATTEMPT@";
+    const activity = document.getElementById("activity");
+    const install = document.getElementById("install");
+    const stage = document.getElementById("stage");
+    const detail = document.getElementById("detail");
+    const track = document.getElementById("track");
+    const fill = document.getElementById("fill");
+    let startedAt = 0;
+    let lastStage = "";
+    function showProgress(percent, label) {
+      track.classList.remove("waiting");
+      fill.style.width = percent + "%";
+      track.setAttribute("aria-valuenow", String(percent));
+      track.setAttribute("aria-valuetext", label);
+    }
+    async function poll() {
+      if (!startedAt) return;
+      try {
+        const response = await fetch("status.json?attempt=" + attempt, {cache:"no-store"});
+        if (!response.ok) throw new Error("Status unavailable");
+        const state = await response.json();
+        if (state.stage !== lastStage) lastStage = state.stage;
+        if (state.stage === "ready") {
+          stage.textContent = "Waiting for iOS to request the build…";
+          if (Date.now() - startedAt > 12000) detail.textContent = "No download request yet. Tap “Try install again” and keep Tailscale connected.";
+        } else if (state.stage === "manifest") {
+          stage.textContent = "iOS found the build. Starting download…";
+          detail.textContent = "The installer has requested the build manifest.";
+        } else if (state.stage === "downloading" || state.stage === "transferred") {
+          const percent = Math.min(100, Math.round(100 * state.sent / Math.max(1, state.total)));
+          showProgress(percent, percent + "% of IPA sent to iOS");
+          stage.textContent = state.stage === "transferred" ? "IPA transfer complete" : "Sending IPA to iOS · " + percent + "%";
+          detail.textContent = state.stage === "transferred"
+            ? "iOS now finishes the installation. Wait for the app icon to settle, then fully close and reopen the app."
+            : "This tracks bytes sent by Gala. iOS handles the final installation separately.";
+        } else if (state.stage === "interrupted") {
+          stage.textContent = "Download interrupted";
+          detail.textContent = "Keep Tailscale connected and tap “Try install again.”";
+        } else if (state.stage === "superseded") {
+          stage.textContent = "A newer build is available";
+          detail.textContent = "Reload this page before installing.";
+        }
+      } catch (_) {
+        detail.textContent = "Gala cannot reach the Mac right now. Check Tailscale, then retry.";
+      }
+    }
+    function begin() {
+      activity.hidden = false;
+      install.textContent = "Try install again";
+      startedAt = Date.now();
+      stage.textContent = "Opening the iOS installer…";
+      poll();
+    }
+    install.addEventListener("click", begin);
+    setInterval(poll, 1000);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
+    if (new URLSearchParams(location.search).has("install")) {
+      setTimeout(() => { begin(); location.href = install.href; }, 150);
+    }
+  </script>
+</body>
+</html>

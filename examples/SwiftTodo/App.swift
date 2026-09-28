@@ -11,9 +11,9 @@ private struct TodoListView: View {
     @State private var todos: [Todo] = []
     @State private var draft = ""
 
-    private let canvas = Color(red: 0.93, green: 0.96, blue: 0.91)
-    private let forest = Color(red: 0.13, green: 0.31, blue: 0.22)
-    private let coral = Color(red: 0.91, green: 0.47, blue: 0.38)
+    private let canvas = Color(red: 1.0, green: 0.53, blue: 0.25)
+    private let forest = Color(red: 0.30, green: 0.13, blue: 0.15)
+    private let coral = Color(red: 0.91, green: 0.24, blue: 0.12)
 
     private var completedCount: Int {
         todos.filter(\.isDone).count
@@ -33,17 +33,17 @@ private struct TodoListView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("A fresh start")
+                            Text("ORANGE MODE")
                                 .font(.largeTitle.bold())
-                                .foregroundStyle(forest)
-                            Text("Make room for the good stuff.")
+                                .foregroundStyle(.white)
+                            Text("This is the new SwiftTodo build.")
                                 .font(.subheadline)
-                                .foregroundStyle(forest.opacity(0.7))
+                                .foregroundStyle(.white.opacity(0.85))
                         }
                         Spacer()
-                        Image(systemName: "leaf.fill")
+                        Image(systemName: "sun.max.fill")
                             .font(.title2)
-                            .foregroundStyle(forest)
+                            .foregroundStyle(coral)
                             .frame(width: 48, height: 48)
                             .background(.white, in: RoundedRectangle(cornerRadius: 16))
                     }
@@ -65,7 +65,7 @@ private struct TodoListView: View {
                                 .foregroundStyle(.white)
                         }
                         ProgressView(value: completion)
-                            .tint(Color(red: 0.76, green: 0.89, blue: 0.58))
+                            .tint(Color(red: 1.0, green: 0.85, blue: 0.48))
                             .accessibilityLabel("Task completion")
                             .accessibilityValue("\(completedCount) of \(todos.count) tasks")
                     }
@@ -81,7 +81,7 @@ private struct TodoListView: View {
                             Image(systemName: "plus")
                                 .font(.headline)
                                 .frame(width: 38, height: 38)
-                                .background(coral, in: RoundedRectangle(cornerRadius: 11))
+                                .background(forest, in: RoundedRectangle(cornerRadius: 11))
                                 .foregroundStyle(.white)
                         }
                         .accessibilityLabel("Add task")
