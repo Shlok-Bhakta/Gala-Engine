@@ -62,7 +62,12 @@ def project_paths(options):
     stem = re.sub(r"[^a-z0-9_-]+", "-", source.name.lower()).strip("-")
     origin = subprocess.run(["git", "-C", str(source), "config", "--get", "remote.origin.url"],
                             capture_output=True, text=True, check=False) if shutil.which("git") else None
-    identity = origin.stdout.strip() if origin and origin.returncode == 0 else str(source)
+    identity = str(source)
+    if origin and origin.returncode == 0:
+        top = subprocess.run(["git", "-C", str(source), "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, check=False)
+        relative = os.path.relpath(source, top.stdout.strip()) if top.returncode == 0 else source.name
+        identity = f"{origin.stdout.strip()}/{relative}"
     suffix = hashlib.sha256(identity.encode()).hexdigest()[:8]
     name = options.name or f"{stem}-{suffix}"
     if not SAFE_NAME.fullmatch(name):

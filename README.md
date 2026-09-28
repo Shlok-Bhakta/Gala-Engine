@@ -64,7 +64,7 @@ pipforge build
 
 Results arrive at `.pipforge/runs/<job-id>/` in the project. Add `.pipforge/` to the project's `.gitignore`.
 
-The Mac mirror name includes a short hash of the Git remote, so two projects with the same directory name do not collide. Use `--name` to choose a fixed mirror name when needed.
+The Mac mirror name includes a short hash of the Git remote and the project's path within that repo, so projects with the same directory name do not collide. Use `--name` to choose a fixed mirror name when needed.
 
 For a real minimal UIKit example:
 
@@ -90,6 +90,10 @@ Pipforge excludes Git metadata, `.pipforge`, Nix/Node/Expo/Xcode build directori
 - **Expo:** Prebuild the iOS project on the Mac, then run its Xcode build in `ios-build.sh`. `eas build --local` is an alternative for EAS parity, but Expo's local mode does not support caching.
 
 The Mac serializes build recipes across all Pipforge projects, which fits its 8 GB of RAM. Source sync can happen before a build slot becomes free.
+
+## SourceKit language service
+
+This Mac has `sourcekit-lsp` in Xcode, but Pipforge does not yet proxy it to Linux editors. A useful proxy needs to keep the project mirror current, start SourceKit from the Mac worker so it can read the USB volume, and translate `file://` document paths in both directions between the Linux checkout and Mac mirror. Running `ssh macbook xcrun sourcekit-lsp` alone would hit the USB volume access failure observed here. Build output and diagnostics are available today through `pipforge build` and its log.
 
 ## Agent use
 
