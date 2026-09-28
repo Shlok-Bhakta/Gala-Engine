@@ -561,17 +561,20 @@ def worker_publish(root, project_name, source):
             signed.unlink(missing_ok=True)
         if source == "incoming":
             ipa.unlink(missing_ok=True)
-    threading.Thread(target=notify_subscribers, args=(root, project_name, metadata), daemon=True).start()
-    return {"project": project_name, "sha256": artifact["sha256"], "bytes": artifact["bytes"], **metadata}
+    notifications = notify_subscribers(root, project_name, metadata)
+    return {"project": project_name, "sha256": artifact["sha256"], "bytes": artifact["bytes"],
+            "notifications": notifications, **metadata}
 
 
 def notify_subscribers(root, project, metadata):
-    if not (root / "subscriptions.json").is_file():
-        return
+    subscriptions = root / "subscriptions.json"
+    if not subscriptions.is_file():
+        return {"registered": 0, "sent": 0, "failed": 0}
     payload = {"title": f"{metadata['title']} update ready",
                "body": "Tap to install the latest Gala build.",
                "project": project, "url": f"/gala/{project}/?install=1"}
-    report = {"at": time.time()}
+    count = len(json.loads(subscriptions.read_text()))
+    report = {"at": time.time(), "registered": count, "sent": 0, "failed": count}
     try:
         result = subprocess.run(["/opt/homebrew/opt/node@24/bin/node", str(root / "webpush.js"),
                                  "send", str(root), json.dumps(payload)],
@@ -585,6 +588,7 @@ def notify_subscribers(root, project, metadata):
     except (OSError, subprocess.TimeoutExpired, ValueError, KeyError) as error:
         report.update({"exit_code": 1, "error": str(error)})
     (root / "push-status.json").write_text(json.dumps(report) + "\n")
+    return {key: report.get(key, 0) for key in ("registered", "sent", "failed")}
 
 
 def expire_ota(root):
@@ -966,6 +970,14 @@ def client_publish_job(options, source, remote_project, job):
     print(f"Signed IPA: {ipa_url}")
     print(f"SHA-256: {details['sha256']}")
     print(f"Registered devices in profile: {details['profile_devices']}")
+    notifications = details.get("notifications", {})
+    registered = notifications.get("registered", 0)
+    sent = notifications.get("sent", 0)
+    print(f"Build notifications: {sent} sent to {registered} subscribed devices")
+    if registered < 2:
+        print("Subscribe the iPhone and iPad from the Gala Home Screen page to notify both")
+    elif sent < registered:
+        print("Some build notifications failed; inspect the Mac's push-status.json")
     if not {1, 2}.issubset(set(details.get("families", []))):
         print("Note: this app does not declare support for both iPhone and iPad")
 
