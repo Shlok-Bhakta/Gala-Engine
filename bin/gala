@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.parse
 import uuid
 import zipfile
@@ -30,6 +31,7 @@ EXCLUDES = (
     ".git/", ".gala/", ".direnv/", ".DS_Store",
     "node_modules/", ".expo/", "DerivedData/", ".build/", "build/",
 )
+WATCH_IGNORED = {".git", ".gala", ".direnv", "node_modules", ".expo", "DerivedData", ".build", "build"}
 
 
 def fail(message):
@@ -115,6 +117,59 @@ def sync(options, source, remote_project):
     command.extend((f"{source}/", daemon_url(f"{remote_project}/source/")))
     print(f"Syncing {source} to {options.host}:{options.root}/{remote_project}/source", flush=True)
     rsync_command(options, *command)
+
+
+def source_snapshot(source):
+    listing = subprocess.run(["git", "-C", str(source), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                             capture_output=True, check=False) if shutil.which("git") else None
+    if listing and listing.returncode == 0:
+        relative_paths = [Path(os.fsdecode(item)) for item in listing.stdout.split(b"\0") if item]
+    else:
+        relative_paths = []
+        for directory, children, files in os.walk(source):
+            children[:] = [child for child in children if child not in WATCH_IGNORED]
+            relative_paths.extend((Path(directory) / file).relative_to(source) for file in files)
+    snapshot = []
+    for relative in relative_paths:
+        if any(part in WATCH_IGNORED for part in relative.parts):
+            continue
+        path = source / relative
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            continue
+        if path.is_file():
+            snapshot.append((str(relative), stat.st_size, stat.st_mtime_ns))
+    return tuple(sorted(snapshot))
+
+
+def client_watch(options):
+    source = source_root(Path.cwd().resolve())
+    command = [sys.executable, str(Path(__file__).resolve()), options.mode,
+               "--host", options.host, "--root", options.root]
+    if options.name:
+        command.extend(("--name", options.name))
+    if options.checksum:
+        command.append("--checksum")
+    if options.gate and options.mode in ("build", "run"):
+        command.append("--gate")
+    snapshot = source_snapshot(source)
+    print(f"Watching {source}; action: {options.mode}. Press Ctrl-C to stop.", flush=True)
+    while True:
+        code = subprocess.run(command, cwd=source).returncode
+        print(f"{options.mode} {'passed' if code == 0 else 'failed'}; waiting for edits...", flush=True)
+        while True:
+            time.sleep(options.interval)
+            next_snapshot = source_snapshot(source)
+            if next_snapshot != snapshot:
+                snapshot = next_snapshot
+                break
+        while True:
+            time.sleep(options.debounce)
+            next_snapshot = source_snapshot(source)
+            if next_snapshot == snapshot:
+                break
+            snapshot = next_snapshot
 
 
 def client_doctor(options):
@@ -388,6 +443,15 @@ def main():
             cmd.add_argument("--gate", action="store_true", help="require ios-test.sh to pass before building")
     publish = sub.add_parser("publish", help="upload an unsigned IPA and print an Autoloader link")
     publish.add_argument("ipa", nargs="?", help="IPA path; defaults to latest Gala Engine build")
+    watch = sub.add_parser("watch", help="rerun a Gala action after source edits")
+    watch.add_argument("--action", dest="mode", choices=("test", "build", "run", "deliver"), default="run")
+    watch.add_argument("--host", default=os.environ.get("GALA_HOST", "macbook"))
+    watch.add_argument("--root", default=os.environ.get("GALA_REMOTE_ROOT", DEFAULT_ROOT))
+    watch.add_argument("--name")
+    watch.add_argument("--checksum", action="store_true")
+    watch.add_argument("--gate", action="store_true")
+    watch.add_argument("--interval", type=float, default=1.0)
+    watch.add_argument("--debounce", type=float, default=0.75)
     service = sub.add_parser("mac-service", help="run the Mac-side build and rsync service")
     service.add_argument("--root", default=os.environ.get("GALA_REMOTE_ROOT", DEFAULT_ROOT))
     device = sub.add_parser("device", help="list, pair, and inspect USB iPhone/iPad devices")
@@ -421,6 +485,11 @@ def main():
             client_deploy(options)
         elif options.action == "publish":
             client_publish(options)
+        elif options.action == "watch":
+            validate_options(options)
+            if options.interval <= 0 or options.debounce <= 0:
+                fail("Watch interval and debounce must be positive")
+            client_watch(options)
         else:
             validate_options(options)
             source, _, remote_project = project_paths(options)
@@ -441,6 +510,9 @@ def main():
                     elif options.action == "deliver":
                         options.ipa = None
                         client_publish(options)
+    except KeyboardInterrupt:
+        print("Stopped watching")
+        return 130
     except (RuntimeError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, zipfile.BadZipFile) as error:
         print(f"gala: {error}", file=sys.stderr)
         return 1

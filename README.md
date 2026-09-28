@@ -85,9 +85,13 @@ gala test              # sync, run ios-test.sh, return test.log and reports
 gala build --gate      # test must pass before building
 gala run --gate        # ThinkPad: test, build, sign, and upgrade over USB
 gala deliver           # crabcake: test, build, upload IPA, print Autoloader link
+gala watch             # ThinkPad: run once, then rebuild and upgrade after edits
+gala watch --action deliver  # crabcake: test, build, and publish after edits
 ```
 
 `gala deliver` is the one-command agent path on crabcake. It requires `ios-test.sh`; a missing or failing test prevents the build and upload. Each step has its own `.gala/runs/<job-id>/` directory with a log and `result.json`. A recipe failure returns a nonzero CLI status and the log path. Agents should read the full log, fix the cause, and retry. A successful test step only proves what that project's test script actually checks. The SwiftTodo example currently checks iOS Swift type correctness and bundle identity; the owner separately confirmed its task UI on a physical phone.
+
+`gala watch` polls tracked and non-ignored untracked source files, waits for edits to settle, then repeats the selected action. It keeps watching after a failed action. It ignores `.gala`, Git metadata, and common generated build directories. Use `--action build` for an unsigned artifact without a phone, or `--action deliver` to publish each successful gated build. `--gate` works with watch's `build` and `run` actions. Stop it with Ctrl-C. Watch is a plain terminal loop, not a multi-pane TUI.
 
 `gala publish [path/to/unsigned.ipa]` uploads an existing IPA without rebuilding; by default it selects the latest unsigned Gala IPA in the project. It prints a direct HTTPS IPA URL and a tappable Autoloader link, and records them in `publish.json` beside the IPA. Planista uploads are public and unlisted, so run this only for artifacts meant to be shared. Autoloader signs and installs on the user's iPhone or iPad; crabcake needs no USB pairing or signing files. The upload is separate from `gala build`, which keeps ordinary local builds private.
 
