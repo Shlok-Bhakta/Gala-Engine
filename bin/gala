@@ -218,8 +218,11 @@ def client_deploy(options):
     checked(["zsign", "-k", str(p12), "-p", password, "-m", str(profile),
              "-o", str(signed), str(ipa)])
     print(f"Signed IPA: {signed}", flush=True)
-    checked(["ideviceinstaller", "-u", udid, "install", str(signed)])
-    print(f"Installed on {udid}")
+    upgrade = subprocess.run(["ideviceinstaller", "-u", udid, "upgrade", str(signed)])
+    if upgrade.returncode:
+        print("Upgrade failed; trying an initial install", flush=True)
+        checked(["ideviceinstaller", "-u", udid, "install", str(signed)])
+    print(f"Deployed on {udid}")
 
 
 def worker_prepare(project):
@@ -384,7 +387,7 @@ def main():
         cmd.add_argument("project")
         if action == "worker-build":
             cmd.add_argument("job")
-    options = parser.parse_args()
+    options = parser.parse_args(['run'] if len(sys.argv) == 1 else None)
     try:
         if options.action == "doctor":
             client_doctor(options)

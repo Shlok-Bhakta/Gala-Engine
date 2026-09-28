@@ -55,7 +55,14 @@ Put one file named `ios-build.sh` at the root of the project. It runs on the Mac
 | `GALA_JOBS` | Suggested parallel job count. Defaults to 2 for this Mac. |
 | `GALA_PLATFORM` | `ios`. |
 
-The script can call `xcodebuild`, CMake/Ninja, Expo prebuild, or other project tools. It must exit nonzero on failure and put an IPA in the artifact directory on success. Gala Engine checks the ZIP and `Payload/*.app` layout, calculates SHA-256, and returns the build log either way. `gala run` then signs and installs the IPA on the connected device.
+The script can call `xcodebuild`, CMake/Ninja, Expo prebuild, or other project tools. It must exit nonzero on failure and put an IPA in the artifact directory on success. Gala Engine checks the ZIP and `Payload/*.app` layout, calculates SHA-256, and returns the build log either way. Bare `gala` builds, signs, and deploys to the connected device. `gala run` does the same thing.
+
+To get `gala` from an app's own `nix develop`, add Gala Engine to that app's flake dev shell. The [SwiftTodo flake](examples/SwiftTodo/flake.nix) is a minimal example. From its directory, the daily flow is:
+
+```sh
+nix develop
+gala
+```
 
 Run the build from anywhere under the project:
 
@@ -94,10 +101,10 @@ Accept **Trust This Computer** on the device and enter its passcode when prompte
 To sign on Linux, obtain a `.p12` containing the Apple Development certificate **and its private key**, plus a matching development `.mobileprovision` that includes the device and app bundle ID. Keep the private key outside Git. Gala Engine looks for `~/.config/gala-engine/development.p12` and `development.mobileprovision` by default. It reads `development.p12.password` from the same directory when present, or prompts for the password. Then, from the app project:
 
 ```sh
-gala run
+gala
 ```
 
-`gala run` syncs, builds, returns the IPA, signs it with `zsign`, and installs it over USB with `ideviceinstaller`. Open the app on the device after installation. Linux's `idevicedebug` cannot launch this iOS 27 phone yet because it asks for a matching developer image. Use `gala build` and `gala deploy` separately when diagnosing a step; `deploy` accepts an IPA path. The device's first app launch may ask you to trust the developer. See the upstream [pairing](https://github.com/libimobiledevice/libimobiledevice/blob/master/docs/idevicepair.1), [Developer Mode](https://github.com/libimobiledevice/libimobiledevice/blob/master/docs/idevicedevmodectl.1), [install](https://github.com/libimobiledevice/ideviceinstaller/blob/master/README.md), and [signing](https://github.com/zhlynn/zsign) documentation for the underlying commands.
+`gala` syncs, builds, returns the IPA, signs it with `zsign`, and uses `ideviceinstaller upgrade` to update the app over USB. On a first install, it falls back to `ideviceinstaller install`. Keep the app's `CFBundleIdentifier` stable: changing it creates a separate icon and app data container. Open the app on the device after deployment. Linux's `idevicedebug` cannot launch this iOS 27 phone yet because it asks for a matching developer image. Use `gala build` and `gala deploy` separately when diagnosing a step; `deploy` accepts an IPA path. The device's first app launch may ask you to trust the developer. See the upstream [pairing](https://github.com/libimobiledevice/libimobiledevice/blob/master/docs/idevicepair.1), [Developer Mode](https://github.com/libimobiledevice/libimobiledevice/blob/master/docs/idevicedevmodectl.1), [install and upgrade](https://github.com/libimobiledevice/ideviceinstaller/blob/master/man/ideviceinstaller.1), and [signing](https://github.com/zhlynn/zsign) documentation for the underlying commands.
 
 ## Sync behavior
 
