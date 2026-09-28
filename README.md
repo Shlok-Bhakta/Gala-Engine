@@ -1,8 +1,8 @@
 # Gala Engine
 
-Build unsigned iPhone and iPad IPAs on a Mac while working on Linux. Gala Engine syncs a project to the Mac's bulk volume, runs its `ios-build.sh` there, and copies the IPA and build log back. Tailscale supplies the private network; Gala Engine uses your existing SSH setup. It can also run project tests and publish an IPA for Autoloader.
+Build iPhone and iPad IPAs on a Mac while working on Linux. Gala Engine syncs a project to the Mac's bulk volume, runs its `ios-build.sh` there, and copies the unsigned IPA and build log back. For delivery, the Mac signs the IPA and hosts the current build privately over Tailscale. A Home Screen web app can notify an iPhone and iPad when the update is ready.
 
-Gala Engine is deliberately small. A Mac-side worker owns the build volume and listens only on `127.0.0.1`; SSH carries its control calls and rsync traffic. There is no account, web UI, simulator, or GitHub push in the build path. It builds the files in your current working tree, including uncommitted edits.
+The Mac-side worker owns the build volume and listens only on `127.0.0.1`; SSH carries its control calls and rsync traffic. Tailscale Serve exposes the install page, manifest, and signed IPA only to the tailnet. There is no account, simulator, or GitHub push in the build path. Gala builds the files in your current working tree, including uncommitted edits.
 
 ## One-time setup
 
@@ -22,11 +22,17 @@ On the Mac, turn on System Settings → General → Sharing → Remote Login, wi
 mkdir -p /Volumes/BlenderBuild/gala-engine
 git clone git@github.com:Shlok-Bhakta/Gala-Engine.git /Volumes/BlenderBuild/gala-engine-tool
 cp /Volumes/BlenderBuild/gala-engine-tool/bin/gala /Volumes/BlenderBuild/gala-engine/service.py
+cp /Volumes/BlenderBuild/gala-engine-tool/mac/{dashboard.html,sw.js,manifest.webmanifest,icon.svg,icon-57.png,icon-512.png,webpush.js,package.json,package-lock.json} /Volumes/BlenderBuild/gala-engine/
+cd /Volumes/BlenderBuild/gala-engine
+npm_config_cache=/Volumes/BlenderBuild/gala-engine/npm-cache npm ci --ignore-scripts --no-audit --no-fund
 cp /Volumes/BlenderBuild/gala-engine-tool/mac/com.gala.engine.plist ~/Library/LaunchAgents/
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.gala.engine.plist
+tailscale serve --bg --https=443 --set-path=/gala http://127.0.0.1:18732
 ```
 
-This Mac already has the worker running under the included [`mac/com.gala.engine.plist`](mac/com.gala.engine.plist), with its script at `/Volumes/BlenderBuild/gala-engine/service.py`. The LaunchAgent was verified to restart the worker after a process stop. For a fresh setup, install the plist in `~/Library/LaunchAgents/` and load it with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.gala.engine.plist`. It starts when that user logs in after a reboot. The plist sends console output to `/dev/null` because launchd could not open a log file on this USB volume; each build still writes its own log there. If `gala doctor` reports a volume access error, grant `/opt/homebrew/bin/python3` access in System Settings → Privacy & Security → Full Disk Access. The worker keeps its script, configuration, source mirrors, and build caches on the USB volume. It binds rsync to `127.0.0.1:18730` and build control to `127.0.0.1:18731`; the client reaches both through SSH.
+The LaunchAgent starts when that user logs in after a reboot. The plist sends console output to `/dev/null` because launchd could not open a log file on this USB volume; each build still writes its own log there. If `gala doctor` reports a volume access error, grant `/opt/homebrew/bin/python3` access in System Settings → Privacy & Security → Full Disk Access. The worker keeps its script, configuration, source mirrors, build caches, signed current IPAs, and push subscriptions on the USB volume. It binds rsync to `127.0.0.1:18730`, build control to `127.0.0.1:18731`, and the private install server to `127.0.0.1:18732`. Keep the Tailscale Serve route tailnet only. Do not use Funnel for `/gala`.
+
+For Mac signing, install a valid development or ad hoc profile that includes both devices and a matching certificate with its private key in the Mac keychain. The current wildcard development profile lists two devices and the matching certificate. macOS may ask once to let `codesign` use the private key. Until that authorization succeeds, `gala deliver` cannot produce an installable OTA IPA.
 
 Clone Gala Engine on the client and enter its Nix shell:
 
@@ -84,18 +90,21 @@ For Mac-side tests, add an executable `ios-test.sh` at the same root as `ios-bui
 gala test              # sync, run ios-test.sh, return test.log and reports
 gala build --gate      # test must pass before building
 gala run --gate        # ThinkPad: test, build, sign, and upgrade over USB
-gala deliver           # crabcake: test, build, upload IPA, print Autoloader link
+gala deliver           # test, build, Mac sign, publish the current OTA build
+gala build --deliver   # same delivery flow from the build command
 gala watch             # ThinkPad: run once, then rebuild and upgrade after edits
-gala watch --action deliver  # crabcake: test, build, and publish after edits
+gala watch --action deliver  # test, build, sign, and notify after edits
 ```
 
-`gala deliver` is the one-command agent path on crabcake. It requires `ios-test.sh`; a missing or failing test prevents the build and upload. Each step has its own `.gala/runs/<job-id>/` directory with a log and `result.json`. A recipe failure returns a nonzero CLI status and the log path. Agents should read the full log, fix the cause, and retry. A successful test step only proves what that project's test script actually checks. The SwiftTodo example currently checks iOS Swift type correctness and bundle identity; the owner separately confirmed its task UI on a physical phone.
+`gala deliver` is the one-command agent path on crabcake. It requires `ios-test.sh`; a missing or failing test prevents signing and notification. `gala build --deliver` does the same. A recipe failure returns a nonzero CLI status and the log path. Agents should read the full log, fix the cause, and retry. A successful test step only proves what that project's test script actually checks. The SwiftTodo example currently checks iOS Swift type correctness and bundle identity; the owner separately confirmed its task UI on a physical phone.
 
 `gala watch` polls tracked and non-ignored untracked source files, waits for edits to settle, then repeats the selected action. It keeps watching after a failed action. It ignores `.gala`, Git metadata, and common generated build directories. Use `--action build` for an unsigned artifact without a phone, or `--action deliver` to publish each successful gated build. `--gate` works with watch's `build` and `run` actions. Stop it with Ctrl-C. Watch is a plain terminal loop, not a multi-pane TUI.
 
-`gala publish [path/to/unsigned.ipa]` uploads an existing IPA without rebuilding; by default it selects the latest unsigned Gala IPA in the project. It prints a direct HTTPS IPA URL and a tappable Autoloader link, and records them in `publish.json` beside the IPA. Planista uploads are public and unlisted, so run this only for artifacts meant to be shared. Autoloader signs and installs on the user's iPhone or iPad; crabcake needs no USB pairing or signing files. The upload is separate from `gala build`, which keeps ordinary local builds private.
+`gala publish [path/to/unsigned.ipa]` sends an existing IPA to the Mac to sign and serve, without rebuilding. By default it selects the latest unsigned Gala IPA in the project. It prints the private HTTPS install page and signed IPA URL, and writes `.gala/current-publish.json`. The Mac advances `CFBundleVersion` for each delivery, while keeping `CFBundleIdentifier` stable. The current signed IPA replaces the prior one for that project and expires after 48 hours. No IPA is uploaded to Planista or GitHub. The Mac needs a profile that covers the app bundle ID and both devices. A single universal IPA can update both devices when its `UIDeviceFamily` includes iPhone and iPad.
 
-Gala does not run physical iOS UI automation from crabcake. Maestro's iOS flows require an Apple simulator, which this setup intentionally does not use. A pass on `gala test` and `gala build` therefore cannot claim that the app's actual screen or touch flow was verified. The current device check is a human opening the Autoloader build or using `gala run` from the ThinkPad and reporting behavior. Device UI automation needs a future physical-device runner with an attached iPhone or iPad.
+On each iPhone and iPad, connect Tailscale, open `https://<mac-tailnet-name>/gala/` in Safari, use **Add to Home Screen**, open Gala from the Home Screen, and tap **Enable build notifications**. Gala stores one Web Push subscription per device on the Mac's external drive. When a delivery succeeds, the Mac sends both devices a notification. Tapping it opens the private install page and attempts the `itms-services` handoff. If iOS blocks the automatic handoff, tap **Install update** on that page. This uses Apple's device-signed OTA installation path; it needs no MDM or erase. The device may still display its own install confirmation. The signed app must keep the same bundle ID to update the existing icon and data.
+
+Gala does not run physical iOS UI automation from crabcake. Maestro's iOS flows require an Apple simulator, which this setup intentionally does not use. A pass on `gala test` and `gala build` therefore cannot claim that the app's actual screen or touch flow was verified. The current device check is a human opening the OTA build or using `gala run` from the ThinkPad and reporting behavior. Device UI automation needs a future physical-device runner with an attached iPhone or iPad.
 
 For a real minimal UIKit example:
 
@@ -135,7 +144,7 @@ Normal `rsync` uses file size and modification time to decide which paths need i
 
 Use `gala sync --dry-run` to see what would change. Use `gala build --checksum` when timestamp churn is causing excess transfer; that compares file contents on both machines, but reads the whole tree on both sides. The default is faster for ordinary edit-build cycles.
 
-Gala Engine excludes Git metadata, `.gala`, Nix/Node/Expo/Xcode build directories, and patterns from each `.gitignore`. It deletes synced files removed from the client source mirror while preserving `GALA_BUILD_DIR` and past run artifacts. Large dependencies already installed on the Mac can live outside the mirror and be referenced by `ios-build.sh`.
+Gala Engine excludes Git metadata, `.gala`, Nix/Node/Expo/Xcode build directories, and patterns from each `.gitignore`. It deletes synced files removed from the client source mirror while preserving `GALA_BUILD_DIR`. Large dependencies already installed on the Mac can live outside the mirror and be referenced by `ios-build.sh`.
 
 ## Existing projects
 

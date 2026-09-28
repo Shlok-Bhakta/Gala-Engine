@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#111827">
+<link rel="manifest" href="/gala/manifest.webmanifest">
+<link rel="icon" href="/gala/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/gala/icon-512.png">
+<title>Gala Engine</title>
+<style>
+  :root{color-scheme:dark;font:17px system-ui,-apple-system,sans-serif;background:#111827;color:#f9fafb}
+  body{max-width:32rem;margin:10vh auto;padding:1rem}
+  h1{font-size:2rem;margin:0 0 .5rem}p{color:#cbd5e1;line-height:1.5}
+  button,a.app{display:block;box-sizing:border-box;width:100%;border:0;border-radius:12px;padding:1rem;margin:1rem 0;background:#2563eb;color:white;text-align:center;text-decoration:none;font:600 1rem system-ui;cursor:pointer}
+  a.app{background:#334155}small{display:block;color:#cbd5e1;margin-top:.25rem;font-weight:400}
+  #status{min-height:1.5rem}
+</style>
+<main>
+  <h1>Gala Engine</h1>
+  <p>Build updates from your Mac, available only on your tailnet.</p>
+  <button id="notify">Enable build notifications</button>
+  <p id="status" role="status"></p>
+  <h2>Current builds</h2>
+  <div id="projects"></div>
+  <p id="empty" hidden>No current builds. Run <code>gala deliver</code> in a project.</p>
+</main>
+<script>
+const base = "/gala";
+const status = document.getElementById("status");
+const button = document.getElementById("notify");
+let registration;
+let vapidKey;
+function keyBytes(encoded) {
+  const padded = encoded.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(encoded.length / 4) * 4, "=");
+  return Uint8Array.from(atob(padded), c => c.charCodeAt(0));
+}
+async function ready() {
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+    status.textContent = "This browser does not support Web Push here. Add this page to your Home Screen on iPhone or iPad.";
+    button.disabled = true;
+    return;
+  }
+  registration = await navigator.serviceWorker.register(base + "/sw.js", {scope: base + "/"});
+  const config = await fetch(base + "/config.json").then(r => r.json());
+  vapidKey = keyBytes(config.publicKey);
+  if (Notification.permission === "granted" && await registration.pushManager.getSubscription()) {
+    status.textContent = "Notifications are enabled on this device.";
+  }
+}
+button.addEventListener("click", async () => {
+  try {
+    if (!registration || !vapidKey) throw new Error("The page is still loading. Try again in a moment.");
+    const subscription = await registration.pushManager.subscribe({
+      userVisibleOnly: true, applicationServerKey: vapidKey
+    });
+    const response = await fetch(base + "/subscribe", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({subscription: subscription.toJSON(), device: navigator.userAgent})
+    });
+    if (!response.ok) throw new Error("The Mac did not accept the subscription");
+    status.textContent = "Notifications are enabled on this device.";
+  } catch (error) {
+    status.textContent = "Notifications could not be enabled: " + error.message;
+  }
+});
+async function projects() {
+  try {
+    const items = await fetch(base + "/projects.json", {cache: "no-store"}).then(r => r.json());
+    const holder = document.getElementById("projects");
+    for (const item of items) {
+      const link = document.createElement("a");
+      link.className = "app";
+      link.href = base + "/" + encodeURIComponent(item.project) + "/";
+      link.textContent = item.title;
+      const detail = document.createElement("small");
+      detail.textContent = "Build " + item.version;
+      link.append(detail);
+      holder.append(link);
+    }
+    document.getElementById("empty").hidden = items.length > 0;
+  } catch (error) { status.textContent = "Could not load builds: " + error.message; }
+}
+ready().catch(error => { status.textContent = error.message; });
+projects();
+</script>
+</html>

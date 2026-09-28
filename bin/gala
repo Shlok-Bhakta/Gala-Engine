@@ -6,15 +6,18 @@ import datetime as dt
 import fcntl
 import getpass
 import hashlib
+import html
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 import uuid
@@ -25,6 +28,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 DEFAULT_ROOT = "/Volumes/BlenderBuild/gala-engine"
 RSYNC_PORT = 18730
 API_PORT = 18731
+OTA_PORT = 18732
+OTA_TTL_SECONDS = 48 * 60 * 60
 SAFE_PATH = re.compile(r"^/[A-Za-z0-9_./-]+$")
 SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 EXCLUDES = (
@@ -84,7 +89,7 @@ def project_paths(options):
 
 
 def service_request(host, method, path, check=True, **kwargs):
-    return remote(host, "curl", "-fsS", "-X", method,
+    return remote(host, "curl", "--fail-with-body", "-sS", "-X", method,
                   f"http://127.0.0.1:{API_PORT}/{path}", check=check, **kwargs)
 
 
@@ -185,6 +190,9 @@ def client_doctor(options):
     if service_root != options.root:
         fail(f"Mac service uses {service_root}, not {options.root}")
     print(f"Mac service: {service_root} (rsync ready)")
+    remote(options.host, "curl", "-fsS", f"http://127.0.0.1:{OTA_PORT}/gala/projects.json",
+           capture_output=True, text=True, timeout=10)
+    print("Private OTA server: ready")
 
 
 def connected_udids():
@@ -287,7 +295,7 @@ def client_deploy(options):
 def worker_prepare(project):
     project = Path(project)
     project.mkdir(parents=True, exist_ok=True)
-    for child in ("source", "build", "runs"):
+    for child in ("source", "build", "runs", "incoming"):
         (project / child).mkdir(exist_ok=True)
 
 
@@ -321,6 +329,134 @@ def inspect_ipas(run_dir):
         digest = sha.hexdigest()
         artifacts.append({"path": str(ipa.relative_to(run_dir)), "sha256": digest, "bytes": ipa.stat().st_size})
     return artifacts
+
+
+def signing_profiles():
+    directories = (Path.home() / "Library/MobileDevice/Provisioning Profiles",
+                   Path.home() / "Library/Developer/Xcode/UserData/Provisioning Profiles")
+    identities = checked(["security", "find-identity", "-v", "-p", "codesigning"],
+                         capture_output=True, text=True).stdout
+    available = set(re.findall(r"\b[A-F0-9]{40}\b", identities))
+    for path in (profile for directory in directories for profile in directory.glob("*.mobileprovision")):
+        decoded = subprocess.run(["security", "cms", "-D", "-i", str(path)],
+                                 capture_output=True, check=False)
+        if decoded.returncode:
+            continue
+        profile = plistlib.loads(decoded.stdout)
+        for certificate in profile.get("DeveloperCertificates", []):
+            identity = hashlib.sha1(certificate).hexdigest().upper()
+            if identity in available and profile.get("ProvisionedDevices"):
+                yield path, profile, identity
+
+
+def profile_for_bundle(bundle_id):
+    now = dt.datetime.now(dt.timezone.utc)
+    candidates = []
+    for path, profile, identity in signing_profiles():
+        expiry = profile.get("ExpirationDate")
+        if expiry and expiry.replace(tzinfo=dt.timezone.utc) < now:
+            continue
+        app_id = profile.get("Entitlements", {}).get("application-identifier", "")
+        if app_id.endswith("*") and bundle_id.startswith(app_id.split(".", 1)[1][:-1]):
+            candidates.append((len(app_id), path, profile, identity))
+        elif app_id.endswith("." + bundle_id):
+            candidates.append((len(app_id) + 1000, path, profile, identity))
+    if not candidates:
+        fail(f"No installed device provisioning profile and keychain identity cover {bundle_id}")
+    _, path, profile, identity = max(candidates, key=lambda item: item[0])
+    return path, profile, identity
+
+
+def bundle_info(bundle):
+    info = plistlib.loads((bundle / "Info.plist").read_bytes())
+    bundle_id = info.get("CFBundleIdentifier")
+    if not bundle_id:
+        fail(f"Missing CFBundleIdentifier in {bundle}")
+    return info, bundle_id
+
+
+def code_sign(arguments, timeout=300):
+    try:
+        result = subprocess.run(["codesign", *arguments], capture_output=True, text=True,
+                                timeout=timeout, check=False)
+    except subprocess.TimeoutExpired:
+        if timeout <= 20:
+            fail("Mac keychain did not grant codesign access to the signing key within 15 seconds")
+        fail(f"codesign timed out after {timeout} seconds")
+    if result.returncode:
+        fail(f"codesign failed: {result.stderr.strip() or result.stdout.strip()}")
+
+
+def sign_bundle(bundle, scratch):
+    info, bundle_id = bundle_info(bundle)
+    profile_path, profile, identity = profile_for_bundle(bundle_id)
+    shutil.copyfile(profile_path, bundle / "embedded.mobileprovision")
+    entitlements = profile["Entitlements"].copy()
+    team = profile["TeamIdentifier"][0]
+    entitlements["application-identifier"] = f"{team}.{bundle_id}"
+    entitlements["keychain-access-groups"] = [
+        item.replace("*", bundle_id) for item in entitlements.get("keychain-access-groups", [])
+    ]
+    entitlement_path = scratch / f"{uuid.uuid4().hex}.plist"
+    entitlement_path.write_bytes(plistlib.dumps(entitlements))
+    code_sign(["--force", "--timestamp=none", "--sign", identity,
+               "--entitlements", str(entitlement_path), str(bundle)])
+    return info, len(profile["ProvisionedDevices"])
+
+
+def sign_ipa(root, ipa, counter_path=None):
+    scratch = root / "signing" / uuid.uuid4().hex
+    scratch.mkdir(parents=True)
+    try:
+        checked(["ditto", "-x", "-k", str(ipa), str(scratch)], capture_output=True)
+        payload = scratch / "Payload"
+        apps = list(payload.glob("*.app"))
+        if len(apps) != 1:
+            fail("Signing requires exactly one Payload/*.app")
+        app = apps[0]
+        app_info, app_id = bundle_info(app)
+        build_number = None
+        if counter_path:
+            previous = int(counter_path.read_text()) if counter_path.is_file() else 0
+            original = str(app_info.get("CFBundleVersion") or "0")
+            major = int(original.split(".", 1)[0]) if original.split(".", 1)[0].isdigit() else 0
+            build_number = max(previous, major) + 1
+            app_info["CFBundleVersion"] = str(build_number)
+            (app / "Info.plist").write_bytes(plistlib.dumps(app_info))
+            for extension in app.rglob("*.appex"):
+                extension_info, _ = bundle_info(extension)
+                extension_info["CFBundleVersion"] = str(build_number)
+                (extension / "Info.plist").write_bytes(plistlib.dumps(extension_info))
+        _, _, identity = profile_for_bundle(app_id)
+        probe = scratch / "codesign-probe"
+        shutil.copyfile("/bin/echo", probe)
+        probe.chmod(0o755)
+        code_sign(["--force", "--timestamp=none", "--sign", identity, str(probe)], timeout=15)
+        nested = sorted((p for p in app.rglob("*") if p.suffix in (".framework", ".dylib", ".appex")),
+                        key=lambda p: len(p.parts), reverse=True)
+        for path in nested:
+            if path.suffix == ".appex":
+                sign_bundle(path, scratch)
+            else:
+                code_sign(["--force", "--timestamp=none", "--sign", identity, str(path)])
+        info, device_count = sign_bundle(app, scratch)
+        code_sign(["--verify", "--deep", "--strict", str(app)])
+        signed = scratch / "signed.ipa"
+        checked(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(payload), str(signed)],
+                capture_output=True)
+        result = ipa.with_name(ipa.stem.removesuffix("-unsigned") + "-signed.ipa")
+        os.replace(signed, result)
+        if counter_path:
+            counter_path.write_text(str(build_number) + "\n")
+        return result, {
+            "bundle_id": info["CFBundleIdentifier"],
+            "title": info.get("CFBundleDisplayName") or info.get("CFBundleName") or app.stem,
+            "version": str(info.get("CFBundleVersion") or "1"),
+            "families": info.get("UIDeviceFamily", []),
+            "profile_devices": device_count,
+        }
+    finally:
+        shutil.rmtree(scratch)
 
 
 def worker_job(project, job, kind):
@@ -381,6 +517,244 @@ def worker_test(project, job):
     return worker_job(project, job, "test")
 
 
+def worker_publish(root, project_name, source):
+    project = root / "projects" / project_name
+    if source == "incoming":
+        ipa = project / "incoming" / "current.ipa"
+    else:
+        if not re.fullmatch(r"[0-9TZ-]+[a-f0-9]{6}", source):
+            fail("Invalid job ID")
+        run = project / "runs" / source
+        manifest = json.loads((run / "result.json").read_text())
+        if manifest.get("kind") != "build" or manifest.get("exit_code") != 0:
+            fail("Only a successful build can be published")
+        paths = manifest.get("artifacts", [])
+        if len(paths) != 1:
+            fail("Publish needs exactly one IPA; use gala publish <path> to select one")
+        ipa = (run / paths[0]["path"]).resolve()
+        if not ipa.is_relative_to(run.resolve()):
+            fail("IPA path leaves the build run")
+    if not ipa.is_file():
+        fail(f"IPA not found: {ipa}")
+    signed = None
+    staged = None
+    try:
+        signed, metadata = sign_ipa(root, ipa, project / "build-number.txt")
+        artifacts = inspect_ipas(signed.parent)
+        matching = [artifact for artifact in artifacts if artifact["path"] == signed.name]
+        if len(matching) != 1:
+            fail("Signed IPA validation failed")
+        artifact = matching[0]
+        destination = root / "ota" / project_name
+        destination.mkdir(parents=True, exist_ok=True)
+        staged = destination / f".{uuid.uuid4().hex}.ipa"
+        os.link(signed, staged)
+        os.replace(staged, destination / "current.ipa")
+        (destination / "current.json").write_text(json.dumps({
+            "sha256": artifact["sha256"], "bytes": artifact["bytes"],
+            "published_at": time.time(), **metadata,
+        }) + "\n")
+    finally:
+        if staged:
+            staged.unlink(missing_ok=True)
+        if signed:
+            signed.unlink(missing_ok=True)
+        if source == "incoming":
+            ipa.unlink(missing_ok=True)
+    threading.Thread(target=notify_subscribers, args=(root, project_name, metadata), daemon=True).start()
+    return {"project": project_name, "sha256": artifact["sha256"], "bytes": artifact["bytes"], **metadata}
+
+
+def notify_subscribers(root, project, metadata):
+    if not (root / "subscriptions.json").is_file():
+        return
+    payload = {"title": f"{metadata['title']} update ready",
+               "body": "Tap to install the latest Gala build.",
+               "project": project, "url": f"/gala/{project}/?install=1"}
+    report = {"at": time.time()}
+    try:
+        result = subprocess.run(["/opt/homebrew/opt/node@24/bin/node", str(root / "webpush.js"),
+                                 "send", str(root), json.dumps(payload)],
+                                capture_output=True, text=True, timeout=30, check=False)
+        report["exit_code"] = result.returncode
+        if result.returncode == 0:
+            parsed = json.loads(result.stdout)
+            report.update({key: parsed[key] for key in ("sent", "failed", "registered")})
+        else:
+            report["error"] = result.stderr.strip()
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError) as error:
+        report.update({"exit_code": 1, "error": str(error)})
+    (root / "push-status.json").write_text(json.dumps(report) + "\n")
+
+
+def expire_ota(root):
+    ota = root / "ota"
+    if not ota.is_dir():
+        return
+    cutoff = time.time() - OTA_TTL_SECONDS
+    for project in ota.iterdir():
+        if project.is_dir() and SAFE_NAME.fullmatch(project.name):
+            ipa = project / "current.ipa"
+            if ipa.is_file() and ipa.stat().st_mtime < cutoff:
+                ipa.unlink()
+                (project / "current.json").unlink(missing_ok=True)
+
+
+def expiration_loop(root):
+    while True:
+        time.sleep(3600)
+        expire_ota(root)
+
+
+def tailnet_base_url():
+    status = checked(["/opt/homebrew/bin/tailscale", "status", "--json"],
+                     capture_output=True, text=True)
+    hostname = json.loads(status.stdout)["Self"]["DNSName"].rstrip(".")
+    return f"https://{hostname}/gala"
+
+
+def ota_service(root):
+    script = root / "webpush.js"
+    vapid = None
+    if script.is_file():
+        setup = subprocess.run(["/opt/homebrew/opt/node@24/bin/node", str(script), "init", str(root)],
+                               capture_output=True, text=True, check=False)
+        if setup.returncode == 0:
+            vapid = json.loads(setup.stdout)["publicKey"]
+    subscription_lock = threading.Lock()
+
+    class Handler(BaseHTTPRequestHandler):
+        def reply(self, status, body, content_type="application/json", head_only=False):
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            if not head_only:
+                self.wfile.write(body)
+
+        def send_content(self, head_only=False):
+            pieces = urllib.parse.urlsplit(self.path).path.strip("/").split("/")
+            if pieces[:1] == ["gala"]:
+                pieces = pieces[1:]
+            if pieces in ([], [""]):
+                self.reply(200, (root / "dashboard.html").read_bytes(), "text/html; charset=utf-8", head_only)
+                return
+            if len(pieces) == 1 and pieces[0] in ("sw.js", "manifest.webmanifest", "icon.svg", "icon-57.png", "icon-512.png"):
+                types = {"sw.js": "text/javascript", "manifest.webmanifest": "application/manifest+json",
+                         "icon.svg": "image/svg+xml", "icon-57.png": "image/png", "icon-512.png": "image/png"}
+                self.reply(200, (root / pieces[0]).read_bytes(), types[pieces[0]], head_only)
+                return
+            if pieces == ["config.json"]:
+                if not vapid:
+                    self.send_error(503, "Web Push is not configured")
+                else:
+                    self.reply(200, json.dumps({"publicKey": vapid}).encode(), head_only=head_only)
+                return
+            if pieces == ["projects.json"]:
+                projects = []
+                for directory in (root / "ota").glob("*"):
+                    ipa = directory / "current.ipa"
+                    info_file = directory / "current.json"
+                    if ipa.is_file() and info_file.is_file() and ipa.stat().st_mtime >= time.time() - OTA_TTL_SECONDS:
+                        info = json.loads(info_file.read_text())
+                        projects.append({"project": directory.name, "title": info["title"], "version": info["version"]})
+                self.reply(200, json.dumps(projects).encode(), head_only=head_only)
+                return
+            if len(pieces) == 1:
+                pieces.append("")
+            if len(pieces) != 2 or not SAFE_NAME.fullmatch(pieces[0]) or pieces[1] not in ("current.ipa", "manifest.plist", ""):
+                self.send_error(404)
+                return
+            project = pieces[0]
+            ipa = root / "ota" / project / "current.ipa"
+            if not ipa.is_file() or ipa.stat().st_mtime < time.time() - OTA_TTL_SECONDS:
+                self.send_error(404)
+                return
+            if pieces[1] != "current.ipa":
+                info = json.loads((ipa.parent / "current.json").read_text())
+                try:
+                    base_url = tailnet_base_url()
+                except (subprocess.CalledProcessError, KeyError, ValueError):
+                    self.send_error(503, "Tailscale is not ready")
+                    return
+                manifest_url = f"{base_url}/{project}/manifest.plist"
+                if pieces[1] == "manifest.plist":
+                    body = plistlib.dumps({"items": [{"assets": [{"kind": "software-package", "sha256": info["sha256"],
+                        "url": f"{base_url}/{project}/current.ipa?sha256={info['sha256']}"},
+                        {"kind": "display-image", "url": f"{base_url}/icon-57.png"},
+                        {"kind": "full-size-image", "url": f"{base_url}/icon-512.png"}],
+                        "metadata": {"bundle-identifier": info["bundle_id"],
+                                     "bundle-version": info["version"], "kind": "software",
+                                     "platform-identifier": "com.apple.platform.iphoneos",
+                                     "title": info["title"]}}]})
+                    content_type = "application/xml"
+                else:
+                    install = "itms-services://?action=download-manifest&url=" + urllib.parse.quote(manifest_url, safe="")
+                    body = ("<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
+                            f"<title>{html.escape(info['title'])} update</title>"
+                            "<style>body{font:20px system-ui;max-width:28rem;margin:15vh auto;padding:1rem}"
+                            "a{display:block;background:#1683ff;color:white;text-align:center;padding:1rem;border-radius:1rem;text-decoration:none}</style>"
+                            f"<h1>{html.escape(info['title'])}</h1><p>Build {html.escape(info['version'])}</p>"
+                            f"<a id='install' href='{html.escape(install, quote=True)}'>Install update</a>"
+                            "<p id='hint'>If installation does not start, tap the button.</p>"
+                            "<script>if(new URLSearchParams(location.search).has('install'))"
+                            "setTimeout(()=>location.href=document.getElementById('install').href,150)</script>").encode()
+                    content_type = "text/html; charset=utf-8"
+                self.reply(200, body, content_type, head_only)
+                return
+            with ipa.open("rb") as content:
+                size = os.fstat(content.fileno()).st_size
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Disposition", 'attachment; filename="current.ipa"')
+                self.send_header("Content-Length", str(size))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                if not head_only:
+                    shutil.copyfileobj(content, self.wfile)
+
+        def do_GET(self):
+            self.send_content()
+
+        def do_HEAD(self):
+            self.send_content(head_only=True)
+
+        def do_POST(self):
+            pieces = urllib.parse.urlsplit(self.path).path.strip("/").split("/")
+            if pieces[:1] == ["gala"]:
+                pieces = pieces[1:]
+            if pieces != ["subscribe"]:
+                self.send_error(404)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= 8192:
+                    fail("Invalid subscription size")
+                request = json.loads(self.rfile.read(length))
+                subscription = request["subscription"]
+                endpoint = subscription["endpoint"]
+                keys = subscription["keys"]
+                if not endpoint.startswith("https://") or not keys.get("p256dh") or not keys.get("auth"):
+                    fail("Invalid push subscription")
+                entry = {"subscription": subscription, "device": str(request.get("device", ""))[:300],
+                         "registered_at": time.time()}
+                path = root / "subscriptions.json"
+                with subscription_lock:
+                    current = json.loads(path.read_text()) if path.is_file() else []
+                    current = [item for item in current if item["subscription"]["endpoint"] != endpoint]
+                    current.append(entry)
+                    temporary = root / f".subscriptions-{uuid.uuid4().hex}.json"
+                    temporary.write_text(json.dumps(current, indent=2) + "\n")
+                    os.chmod(temporary, 0o600)
+                    os.replace(temporary, path)
+                self.reply(200, b'{"ok":true}\n')
+            except (KeyError, ValueError, TypeError, RuntimeError) as error:
+                self.reply(400, json.dumps({"error": str(error)}).encode())
+
+    ThreadingHTTPServer(("127.0.0.1", OTA_PORT), Handler).serve_forever()
+
+
 def mac_service(root):
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
@@ -393,6 +767,9 @@ def mac_service(root):
                                "--address=127.0.0.1", f"--port={RSYNC_PORT}",
                                f"--config={config}"], stdout=subprocess.DEVNULL,
                               stderr=subprocess.STDOUT)
+    expire_ota(root)
+    threading.Thread(target=expiration_loop, args=(root,), daemon=True).start()
+    threading.Thread(target=ota_service, args=(root,), daemon=True).start()
 
     class Handler(BaseHTTPRequestHandler):
         def respond(self, status, data):
@@ -418,10 +795,15 @@ def mac_service(root):
                     self.respond(200, {"prepared": pieces[1]})
                 elif method == "POST" and len(pieces) == 2 and pieces[0] == "clean" and SAFE_NAME.fullmatch(pieces[1]):
                     clean_runs(root / "projects" / pieces[1] / "runs")
+                    ota = root / "ota" / pieces[1]
+                    (ota / "current.ipa").unlink(missing_ok=True)
+                    (ota / "current.json").unlink(missing_ok=True)
                     self.respond(200, {"cleaned": pieces[1]})
                 elif method == "POST" and len(pieces) == 3 and pieces[0] in ("build", "test") and SAFE_NAME.fullmatch(pieces[1]):
                     code = worker_job(root / "projects" / pieces[1], pieces[2], pieces[0])
                     self.respond(200, {"exit_code": code})
+                elif method == "POST" and len(pieces) == 3 and pieces[0] == "publish" and SAFE_NAME.fullmatch(pieces[1]):
+                    self.respond(200, worker_publish(root, pieces[1], pieces[2]))
                 else:
                     self.respond(404, {"error": "unknown request"})
             except Exception as error:
@@ -456,8 +838,13 @@ def main():
             cmd.add_argument("--profile", help="matching .mobileprovision file")
         if action in ("build", "run"):
             cmd.add_argument("--gate", action="store_true", help="require ios-test.sh to pass before building")
-    publish = sub.add_parser("publish", help="upload an unsigned IPA and print an Autoloader link")
+        if action == "build":
+            cmd.add_argument("--deliver", action="store_true", help="test, build, sign on Mac, and publish for OTA install")
+    publish = sub.add_parser("publish", help="sign an IPA on the Mac and serve it privately for OTA install")
     publish.add_argument("ipa", nargs="?", help="IPA path; defaults to latest Gala Engine build")
+    publish.add_argument("--host", default=os.environ.get("GALA_HOST", "macbook"))
+    publish.add_argument("--root", default=os.environ.get("GALA_REMOTE_ROOT", DEFAULT_ROOT))
+    publish.add_argument("--name")
     watch = sub.add_parser("watch", help="rerun a Gala action after source edits")
     watch.add_argument("--action", dest="mode", choices=("test", "build", "run", "deliver"), default="run")
     watch.add_argument("--host", default=os.environ.get("GALA_HOST", "macbook"))
@@ -518,16 +905,15 @@ def main():
                     clean_runs(source / ".gala" / "runs")
                 sync(options, source, remote_project)
                 if options.action in ("test", "build", "run", "deliver") and not options.dry_run:
-                    if options.action in ("test", "deliver") or getattr(options, "gate", False):
+                    if options.action in ("test", "deliver") or getattr(options, "gate", False) or getattr(options, "deliver", False):
                         client_job_after_sync(options, source, remote_project, "test")
                     if options.action in ("build", "run", "deliver"):
-                        client_job_after_sync(options, source, remote_project, "build")
+                        build_job = client_job_after_sync(options, source, remote_project, "build")
                     if options.action == "run":
                         options.ipa = None
                         client_deploy(options)
-                    elif options.action == "deliver":
-                        options.ipa = None
-                        client_publish(options)
+                    elif options.action == "deliver" or getattr(options, "deliver", False):
+                        client_publish_job(options, source, remote_project, build_job)
     except KeyboardInterrupt:
         print("Stopped watching")
         return 130
@@ -554,30 +940,49 @@ def client_job_after_sync(options, source, remote_project, kind):
         print(f"SHA-256: {artifact['sha256']}")
     if result.returncode or manifest["exit_code"]:
         fail(f"{kind.title()} failed; inspect {destination / f'{kind}.log'}")
+    return job
+
+
+def client_publish_job(options, source, remote_project, job):
+    name = remote_project.rsplit("/", 1)[-1]
+    response = service_request(options.host, "POST", f"publish/{name}/{job}",
+                               check=False, capture_output=True, text=True)
+    if response.returncode:
+        fail(f"Mac signing or publish failed: {response.stdout.strip() or response.stderr.strip()}")
+    details = json.loads(response.stdout)
+    status = remote(options.host, "/opt/homebrew/bin/tailscale", "status", "--json",
+                    capture_output=True, text=True)
+    hostname = json.loads(status.stdout)["Self"]["DNSName"].rstrip(".")
+    base = f"https://{hostname}/gala/{name}"
+    install = base + "/"
+    ipa_url = base + "/current.ipa?sha256=" + details["sha256"]
+    checked(["curl", "-fsSI", install], capture_output=True)
+    checked(["curl", "-fsSI", ipa_url], capture_output=True)
+    result = {"ipa": ipa_url, "install": install, **details}
+    path = source / ".gala" / "current-publish.json"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps(result, indent=2) + "\n")
+    print(f"Install on iPhone or iPad: {install}")
+    print(f"Signed IPA: {ipa_url}")
+    print(f"SHA-256: {details['sha256']}")
+    print(f"Registered devices in profile: {details['profile_devices']}")
+    if not {1, 2}.issubset(set(details.get("families", []))):
+        print("Note: this app does not declare support for both iPhone and iPad")
 
 
 def client_publish(options):
+    validate_options(options)
+    source, name, remote_project = project_paths(options)
     ipa = Path(options.ipa).expanduser().resolve() if options.ipa else latest_ipa()
     if not ipa.is_file() or ipa.suffix.lower() != ".ipa":
         fail(f"IPA not found: {ipa}")
     with zipfile.ZipFile(ipa) as archive:
         if archive.testzip() or not any(name.startswith("Payload/") and ".app/" in name for name in archive.namelist()):
             fail(f"Invalid IPA: {ipa}")
-    if not shutil.which("curl"):
-        fail("Missing curl; it is needed to upload IPAs")
-    response = checked(["curl", "--fail-with-body", "-sS", "-H", "Content-Type: application/octet-stream",
-                        "--data-binary", f"@{ipa}", "https://planista.shloklab.us/"],
-                       capture_output=True, text=True)
-    url = response.stdout.strip()
-    if not url.startswith("https://planista.shloklab.us/"):
-        fail(f"Unexpected upload response: {url}")
-    link = "https://marginally-better-apps.github.io/Autoloader/?url=" + urllib.parse.quote(url, safe="")
-    with ipa.open("rb") as content:
-        digest = hashlib.file_digest(content, "sha256").hexdigest()
-    (ipa.parent / "publish.json").write_text(json.dumps({"ipa": ipa.name, "sha256": digest,
-                                                       "url": url, "autoloader": link}, indent=2) + "\n")
-    print(f"IPA URL: {url}")
-    print(f"Autoloader: {link}")
+    prepare(options, remote_project)
+    incoming = f"{remote_project}/incoming/"
+    rsync_command(options, "-a", str(ipa), daemon_url(incoming + "current.ipa"))
+    client_publish_job(options, source, remote_project, "incoming")
 
 
 if __name__ == "__main__":
