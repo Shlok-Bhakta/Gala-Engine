@@ -4,6 +4,7 @@
 import argparse
 import datetime as dt
 import fcntl
+import getpass
 import hashlib
 import json
 import os
@@ -19,13 +20,13 @@ import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
-DEFAULT_ROOT = "/Volumes/BlenderBuild/pipforge"
+DEFAULT_ROOT = "/Volumes/BlenderBuild/gala-engine"
 RSYNC_PORT = 18730
 API_PORT = 18731
 SAFE_PATH = re.compile(r"^/[A-Za-z0-9_./-]+$")
 SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 EXCLUDES = (
-    ".git/", ".pipforge/", ".direnv/", ".DS_Store",
+    ".git/", ".gala/", ".direnv/", ".DS_Store",
     "node_modules/", ".expo/", "DerivedData/", ".build/", "build/",
 )
 
@@ -88,7 +89,7 @@ def rsync_command(options, *args):
 
 
 def daemon_url(path):
-    return f"rsync://localhost/pipforge/{path}"
+    return f"rsync://localhost/gala/{path}"
 
 
 def prepare(options, remote_project):
@@ -125,6 +126,100 @@ def client_doctor(options):
     if service_root != options.root:
         fail(f"Mac service uses {service_root}, not {options.root}")
     print(f"Mac service: {service_root} (rsync ready)")
+
+
+def connected_udids():
+    for program in ("idevice_id", "idevicepair"):
+        if not shutil.which(program):
+            fail(f"Missing {program}; enter the Gala Engine Nix shell")
+    if not Path("/run/usbmuxd").exists():
+        fail("usbmuxd is not running; apply the ThinkPad NixOS device configuration")
+    result = checked(["idevice_id", "-l"], capture_output=True, text=True)
+    return sorted(line.strip() for line in result.stdout.splitlines() if line.strip())
+
+
+def select_device(requested):
+    devices = connected_udids()
+    if requested:
+        if requested not in devices:
+            fail(f"Device {requested} is not connected over USB")
+        return requested
+    if not devices:
+        fail("No iPhone or iPad is visible; connect and unlock it, then check usbmuxd")
+    if len(devices) > 1:
+        fail("More than one device is connected; pass --udid")
+    return devices[0]
+
+
+def device_action(options):
+    if options.operation == "list":
+        devices = connected_udids()
+        if not devices:
+            print("No iPhone or iPad is visible over USB")
+        for udid in devices:
+            info = subprocess.run(["ideviceinfo", "-u", udid, "-k", "DeviceName"],
+                                  capture_output=True, text=True, check=False)
+            name = info.stdout.strip() if info.returncode == 0 else "not paired"
+            print(f"{udid}  {name}")
+        return
+    udid = select_device(options.udid)
+    if options.operation == "pair":
+        print("Unlock the device and accept its Trust This Computer prompt", flush=True)
+        checked(["idevicepair", "-u", udid, "pair"])
+    checked(["idevicepair", "-u", udid, "validate"])
+    if options.operation == "doctor":
+        checked(["ideviceinfo", "-u", udid, "-k", "ProductVersion"])
+        checked(["idevicedevmodectl", "-u", udid, "list"])
+
+
+def latest_ipa():
+    source = source_root(Path.cwd().resolve())
+    runs = source / ".gala" / "runs"
+    if not runs.is_dir():
+        fail("No Gala Engine builds found; run gala build or pass an IPA path")
+    for run in sorted(runs.iterdir(), reverse=True):
+        if run.is_dir():
+            ipas = [p for p in run.glob("*.ipa") if not p.stem.endswith("-signed")]
+            if len(ipas) == 1:
+                return ipas[0]
+            if len(ipas) > 1:
+                fail(f"Multiple IPAs in {run}; pass the one to deploy")
+    fail("No unsigned IPA found; run gala build or pass an IPA path")
+
+
+def client_deploy(options):
+    for program in ("zsign", "ideviceinstaller"):
+        if not shutil.which(program):
+            fail(f"Missing {program}; enter the Gala Engine Nix shell")
+    ipa = Path(options.ipa).expanduser().resolve() if options.ipa else latest_ipa()
+    if not ipa.is_file() or ipa.suffix.lower() != ".ipa":
+        fail(f"IPA not found: {ipa}")
+    with zipfile.ZipFile(ipa) as archive:
+        if archive.testzip():
+            fail(f"IPA ZIP is corrupt: {ipa}")
+    udid = select_device(options.udid)
+    checked(["idevicepair", "-u", udid, "validate"])
+    config_dir = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "gala-engine"
+    p12 = Path(options.p12 or os.environ.get("GALA_P12", config_dir / "development.p12")).expanduser()
+    profile = Path(options.profile or os.environ.get("GALA_PROFILE", config_dir / "development.mobileprovision")).expanduser()
+    if not p12.is_file() or not profile.is_file():
+        fail("Set --p12 and --profile (or GALA_P12 and GALA_PROFILE) to signing files")
+    password = os.environ.get("GALA_P12_PASSWORD")
+    if password is None:
+        password_file = Path(os.environ.get("GALA_P12_PASSWORD_FILE", config_dir / "development.p12.password"))
+        if password_file.is_file():
+            password = password_file.read_text().strip()
+        elif sys.stdin.isatty():
+            password = getpass.getpass("P12 password: ")
+        else:
+            fail("Set GALA_P12_PASSWORD or GALA_P12_PASSWORD_FILE when running without a terminal")
+    stem = ipa.stem.removesuffix("-unsigned")
+    signed = ipa.with_name(f"{stem}-signed.ipa")
+    checked(["zsign", "-k", str(p12), "-p", password, "-m", str(profile),
+             "-o", str(signed), str(ipa)])
+    print(f"Signed IPA: {signed}", flush=True)
+    checked(["ideviceinstaller", "-u", udid, "install", str(signed)])
+    print(f"Installed on {udid}")
 
 
 def worker_prepare(project):
@@ -170,10 +265,10 @@ def worker_build(project, job):
         return 1
     env = os.environ.copy()
     env.update({
-        "PIPFORGE_ARTIFACT_DIR": str(run_dir),
-        "PIPFORGE_BUILD_DIR": str(project / "build"),
-        "PIPFORGE_JOBS": "2",
-        "PIPFORGE_PLATFORM": "ios",
+        "GALA_ARTIFACT_DIR": str(run_dir),
+        "GALA_BUILD_DIR": str(project / "build"),
+        "GALA_JOBS": "2",
+        "GALA_PLATFORM": "ios",
     })
     lock_path = project.parent.parent / "build.lock"
     with open(lock_path, "w") as lock, open(log_path, "w", buffering=1) as log:
@@ -211,7 +306,7 @@ def mac_service(root):
         probe.write(b"ok")
         probe.flush()
     config = root / "rsyncd.conf"
-    config.write_text(f"[pipforge]\npath = {root}\nread only = no\nuse chroot = no\nlist = no\nhosts allow = 127.0.0.1\n")
+    config.write_text(f"[gala]\npath = {root}\nread only = no\nuse chroot = no\nlist = no\nhosts allow = 127.0.0.1\n")
     daemon = subprocess.Popen(["/usr/bin/rsync", "--daemon", "--no-detach",
                                "--address=127.0.0.1", f"--port={RSYNC_PORT}",
                                f"--config={config}"], stdout=subprocess.DEVNULL,
@@ -262,16 +357,28 @@ def mac_service(root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
-    for action in ("doctor", "sync", "build"):
+    for action in ("doctor", "sync", "build", "run"):
         cmd = sub.add_parser(action)
-        cmd.add_argument("--host", default=os.environ.get("PIPFORGE_HOST", "macbook"))
-        cmd.add_argument("--root", default=os.environ.get("PIPFORGE_REMOTE_ROOT", DEFAULT_ROOT))
+        cmd.add_argument("--host", default=os.environ.get("GALA_HOST", "macbook"))
+        cmd.add_argument("--root", default=os.environ.get("GALA_REMOTE_ROOT", DEFAULT_ROOT))
         if action != "doctor":
             cmd.add_argument("--name", help="stable name for this Mac-side project mirror")
             cmd.add_argument("--checksum", action="store_true", help="compare file contents during sync")
             cmd.add_argument("--dry-run", action="store_true", help="show sync changes without building")
+        if action == "run":
+            cmd.add_argument("--udid", help="select a device when more than one is connected")
+            cmd.add_argument("--p12", help="Apple development certificate and private key")
+            cmd.add_argument("--profile", help="matching .mobileprovision file")
     service = sub.add_parser("mac-service", help="run the Mac-side build and rsync service")
-    service.add_argument("--root", default=os.environ.get("PIPFORGE_REMOTE_ROOT", DEFAULT_ROOT))
+    service.add_argument("--root", default=os.environ.get("GALA_REMOTE_ROOT", DEFAULT_ROOT))
+    device = sub.add_parser("device", help="list, pair, and inspect USB iPhone/iPad devices")
+    device.add_argument("operation", choices=("list", "pair", "doctor"))
+    device.add_argument("--udid", help="select a device when more than one is connected")
+    deploy = sub.add_parser("deploy", help="sign an IPA on Linux and install it over USB")
+    deploy.add_argument("ipa", nargs="?", help="IPA path; defaults to the latest Gala Engine build")
+    deploy.add_argument("--udid", help="select a device when more than one is connected")
+    deploy.add_argument("--p12", help="Apple development certificate and private key")
+    deploy.add_argument("--profile", help="matching .mobileprovision file")
     for action in ("worker-prepare", "worker-build"):
         cmd = sub.add_parser(action, help=argparse.SUPPRESS)
         cmd.add_argument("project")
@@ -287,16 +394,23 @@ def main():
             return worker_build(options.project, options.job)
         elif options.action == "mac-service":
             mac_service(options.root)
+        elif options.action == "device":
+            device_action(options)
+        elif options.action == "deploy":
+            client_deploy(options)
         else:
             validate_options(options)
             source, _, remote_project = project_paths(options)
             prepare(options, remote_project)
             sync(options, source, remote_project)
-            if options.action == "build" and not options.dry_run:
+            if options.action in ("build", "run") and not options.dry_run:
                 # The source is already synced, so skip the duplicate sync in client_build.
                 client_build_after_sync(options, source, remote_project)
+                if options.action == "run":
+                    options.ipa = None
+                    client_deploy(options)
     except (RuntimeError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, zipfile.BadZipFile) as error:
-        print(f"pipforge: {error}", file=sys.stderr)
+        print(f"gala: {error}", file=sys.stderr)
         return 1
     return 0
 
@@ -305,7 +419,7 @@ def client_build_after_sync(options, source, remote_project):
     job = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6]
     print(f"Building on {options.host} (job {job})", flush=True)
     result = service_request(options.host, "POST", f"build/{remote_project.rsplit('/', 1)[-1]}/{job}", check=False)
-    destination = source / ".pipforge" / "runs" / job
+    destination = source / ".gala" / "runs" / job
     destination.mkdir(parents=True, exist_ok=True)
     rsync_command(options, "-a", daemon_url(f"{remote_project}/runs/{job}/"), f"{destination}/")
     manifest = json.loads((destination / "result.json").read_text())

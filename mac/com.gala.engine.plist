@@ -5,11 +5,11 @@
 	<key>KeepAlive</key>
 	<true/>
 	<key>Label</key>
-	<string>com.pipforge.service</string>
+	<string>com.gala.engine</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>/opt/homebrew/bin/python3</string>
-		<string>/Volumes/BlenderBuild/pipforge/service.py</string>
+		<string>/Volumes/BlenderBuild/gala-engine/service.py</string>
 		<string>mac-service</string>
 	</array>
 	<key>RunAtLoad</key>

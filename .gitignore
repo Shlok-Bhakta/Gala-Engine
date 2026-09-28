@@ -1,3 +1,5 @@
 .direnv/
-.pipforge/
+.gala/
 result
+__pycache__/
+*.pyc

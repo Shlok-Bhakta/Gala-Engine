@@ -12,7 +12,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         controller.view.backgroundColor = .systemBackground
 
         let label = UILabel()
-        label.text = "Built by Pipforge"
+        label.text = "Built by Gala Engine"
         label.textColor = .label
         label.font = .preferredFont(forTextStyle: .title1)
         label.translatesAutoresizingMaskIntoConstraints = false
