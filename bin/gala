@@ -629,6 +629,24 @@ def ota_service(root):
     attempt_lock = threading.Lock()
     attempts = {}
 
+    def new_attempt(project, info):
+        token = uuid.uuid4().hex
+        with attempt_lock:
+            for old, value in list(attempts.items()):
+                if value["created"] < time.time() - 3600:
+                    del attempts[old]
+            attempts[token] = {"project": project, "sha256": info["sha256"],
+                               "created": time.time(), "stage": "ready",
+                               "sent": 0, "total": info["bytes"]}
+        return token
+
+    def install_links(base_url, project, info, token):
+        manifest_url = f"{base_url}/{project}/manifest.plist?sha256={info['sha256']}&attempt={token}"
+        install_url = "itms-services://?action=download-manifest&url=" + urllib.parse.quote(manifest_url, safe="")
+        return {"attempt": token, "install_url": install_url,
+                "status_url": f"{base_url}/{project}/status.json?attempt={token}",
+                "web_url": f"{base_url}/{project}/"}
+
     def update_attempt(token, project, sha256, **changes):
         if not re.fullmatch(r"[a-f0-9]{32}", token):
             return
@@ -675,7 +693,10 @@ def ota_service(root):
                     info_file = directory / "current.json"
                     if ipa.is_file() and info_file.is_file() and ipa.stat().st_mtime >= time.time() - OTA_TTL_SECONDS:
                         info = json.loads(info_file.read_text())
-                        projects.append({"project": directory.name, "title": info["title"], "version": info["version"]})
+                        projects.append({"project": directory.name, "title": info["title"], "version": info["version"],
+                                         "sha256": info["sha256"], "bytes": info["bytes"],
+                                         "published_at": info["published_at"], "bundle_id": info["bundle_id"]})
+                projects.sort(key=lambda item: item["published_at"], reverse=True)
                 self.reply(200, json.dumps(projects).encode(), head_only=head_only)
                 return
             if len(pieces) == 1:
@@ -726,16 +747,8 @@ def ota_service(root):
                                      "title": info["title"]}}]})
                     content_type = "application/xml"
                 else:
-                    token = uuid.uuid4().hex
-                    with attempt_lock:
-                        for old, value in list(attempts.items()):
-                            if value["created"] < time.time() - 3600:
-                                del attempts[old]
-                        attempts[token] = {"project": project, "sha256": info["sha256"],
-                                           "created": time.time(), "stage": "ready",
-                                           "sent": 0, "total": info["bytes"]}
-                    manifest_url = f"{base_url}/{project}/manifest.plist?sha256={info['sha256']}&attempt={token}"
-                    install = "itms-services://?action=download-manifest&url=" + urllib.parse.quote(manifest_url, safe="")
+                    token = new_attempt(project, info)
+                    install = install_links(base_url, project, info, token)["install_url"]
                     page = (root / "install.html").read_text()
                     body = (page.replace("@TITLE@", html.escape(info["title"], quote=True))
                             .replace("@VERSION@", html.escape(info["version"], quote=True))
@@ -775,6 +788,23 @@ def ota_service(root):
             pieces = urllib.parse.urlsplit(self.path).path.strip("/").split("/")
             if pieces[:1] == ["gala"]:
                 pieces = pieces[1:]
+            if len(pieces) == 2 and SAFE_NAME.fullmatch(pieces[0]) and pieces[1] == "attempt":
+                project = pieces[0]
+                ipa = root / "ota" / project / "current.ipa"
+                info_file = ipa.parent / "current.json"
+                if not ipa.is_file() or not info_file.is_file() or ipa.stat().st_mtime < time.time() - OTA_TTL_SECONDS:
+                    self.send_error(404)
+                    return
+                try:
+                    info = json.loads(info_file.read_text())
+                    base_url = tailnet_base_url()
+                except (subprocess.CalledProcessError, KeyError, ValueError, OSError):
+                    self.send_error(503, "Gala install is unavailable")
+                    return
+                token = new_attempt(project, info)
+                body = json.dumps(install_links(base_url, project, info, token)).encode()
+                self.reply(200, body)
+                return
             if pieces != ["subscribe"]:
                 self.send_error(404)
                 return
