@@ -1,12 +1,31 @@
 # Pipforge
 
-Build unsigned iPhone and iPad IPAs on a Mac while working on Linux. Pipforge syncs a project over SSH, runs its `ios-build.sh` on the Mac, and copies the IPA and build log back. Tailscale supplies the private network; Pipforge uses your existing SSH setup.
+Build unsigned iPhone and iPad IPAs on a Mac while working on Linux. Pipforge syncs a project to the Mac's bulk volume, runs its `ios-build.sh` there, and copies the IPA and build log back. Tailscale supplies the private network; Pipforge uses your existing SSH setup.
 
-Pipforge is deliberately small. There is no daemon, account, web UI, simulator, or GitHub push in the build path. It builds the files in your current working tree, including uncommitted edits.
+Pipforge is deliberately small. A Mac-side worker owns the build volume and listens only on `127.0.0.1`; SSH carries its control calls and rsync traffic. There is no account, web UI, simulator, or GitHub push in the build path. It builds the files in your current working tree, including uncommitted edits.
 
 ## One-time setup
 
 On the Mac, install Xcode and its iPhoneOS SDK. Keep the bulk build volume mounted. On the client, make sure `ssh macbook` reaches the Mac over Tailscale. If your SSH alias has another name, use `PIPFORGE_HOST` or `--host`.
+
+For a fresh client, add an SSH alias using the Mac's Tailscale name from `tailscale status`:
+
+```sshconfig
+Host macbook
+    HostName <mac-tailnet-name>
+    User <mac-user>
+```
+
+On the Mac, turn on System Settings → General → Sharing → Remote Login, with access for that user. The Mac worker needs local access to the external volume. This Mac's SSH sessions receive `Interrupted system call` on the USB volume despite Remote Login's full disk access option, so Pipforge never writes project files there through an SSH shell. Start the worker once from a local Mac session:
+
+```sh
+mkdir -p /Volumes/BlenderBuild/pipforge
+git clone git@github.com:Shlok-Bhakta/Pipforge.git /Volumes/BlenderBuild/pipforge-tool
+nohup python3 /Volumes/BlenderBuild/pipforge-tool/bin/pipforge mac-service \
+  >>/Volumes/BlenderBuild/pipforge/service.log 2>&1 </dev/null &
+```
+
+This Mac already has the worker running, with its script at `/Volumes/BlenderBuild/pipforge/service.py`. The included [`mac/com.pipforge.service.plist`](mac/com.pipforge.service.plist) can restart it when you log in after a reboot. Add `/opt/homebrew/bin/python3` to System Settings → Privacy & Security → Full Disk Access, then install the plist in `~/Library/LaunchAgents/` and load it with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.pipforge.service.plist`. Without the Python grant, a LaunchAgent cannot write to this USB volume. The worker holds only its script, configuration, logs, source mirrors, and build caches on the USB volume. It binds rsync to `127.0.0.1:18730` and build control to `127.0.0.1:18731`; the client reaches both through SSH.
 
 Clone Pipforge on the client and enter its Nix shell:
 
@@ -22,7 +41,7 @@ You can also add the command to an existing shell without entering a development
 nix shell ~/Projects/Pipforge#default
 ```
 
-The default Mac storage root is `/Volumes/BlenderBuild/pipforge`. Override it with `PIPFORGE_REMOTE_ROOT` if this Mac uses another bulk volume. Pipforge creates its own project mirrors under that root; it never syncs into your normal Mac checkout.
+`pipforge doctor` checks Xcode, the iPhoneOS SDK, and whether the Mac worker can write to the selected build root. The default Mac storage root is `/Volumes/BlenderBuild/pipforge`. Override it with `PIPFORGE_REMOTE_ROOT` if this Mac uses another bulk volume; start the worker with the matching `--root`. Pipforge creates its own project mirrors under that root; it never syncs into your normal Mac checkout or the Mac's internal disk.
 
 ## Add a project
 
@@ -45,6 +64,8 @@ pipforge build
 
 Results arrive at `.pipforge/runs/<job-id>/` in the project. Add `.pipforge/` to the project's `.gitignore`.
 
+The Mac mirror name includes a short hash of the Git remote, so two projects with the same directory name do not collide. Use `--name` to choose a fixed mirror name when needed.
+
 For a real minimal UIKit example:
 
 ```sh
@@ -56,7 +77,7 @@ The example produces an unsigned arm64 iPhone/iPad IPA without an Xcode project 
 
 ## Sync behavior
 
-Normal `rsync` uses file size and modification time to decide which paths need inspection. For a changed file, it transfers differences rather than blindly copying the entire tree. A Git branch switch may update timestamps and cause some otherwise identical files to be sent again. Pipforge has no cross-branch content store on the client or Mac.
+Normal `rsync` uses file size and modification time to decide which paths need inspection. For a changed file, it transfers differences rather than blindly copying the entire tree. A Git branch switch may update timestamps and cause some otherwise identical files to be sent again. Pipforge has no cross-branch content store on the client or Mac. The rsync daemon runs on the Mac under the local worker's volume access; its port is available only through SSH.
 
 Use `pipforge sync --dry-run` to see what would change. Use `pipforge build --checksum` when timestamp churn is causing excess transfer; that compares file contents on both machines, but reads the whole tree on both sides. The default is faster for ordinary edit-build cycles.
 

@@ -13,11 +13,15 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 import zipfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 DEFAULT_ROOT = "/Volumes/BlenderBuild/pipforge"
+RSYNC_PORT = 18730
+API_PORT = 18731
 SAFE_PATH = re.compile(r"^/[A-Za-z0-9_./-]+$")
 SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 EXCLUDES = (
@@ -34,9 +38,9 @@ def checked(args, **kwargs):
     return subprocess.run(args, check=True, **kwargs)
 
 
-def remote(host, *args, check=True, timeout=None):
+def remote(host, *args, check=True, timeout=None, **kwargs):
     command = " ".join(shlex.quote(str(arg)) for arg in args)
-    return subprocess.run(["ssh", host, command], check=check, timeout=timeout)
+    return subprocess.run(["ssh", host, command], check=check, timeout=timeout, **kwargs)
 
 
 def source_root(start):
@@ -55,31 +59,52 @@ def validate_options(options):
 
 def project_paths(options):
     source = source_root(Path.cwd().resolve())
-    name = options.name or re.sub(r"[^a-z0-9_-]+", "-", source.name.lower()).strip("-")
+    stem = re.sub(r"[^a-z0-9_-]+", "-", source.name.lower()).strip("-")
+    origin = subprocess.run(["git", "-C", str(source), "config", "--get", "remote.origin.url"],
+                            capture_output=True, text=True, check=False) if shutil.which("git") else None
+    identity = origin.stdout.strip() if origin and origin.returncode == 0 else str(source)
+    suffix = hashlib.sha256(identity.encode()).hexdigest()[:8]
+    name = options.name or f"{stem}-{suffix}"
     if not SAFE_NAME.fullmatch(name):
         fail("Project name must contain lowercase letters, digits, _ or -")
-    remote_project = f"{options.root}/projects/{name}"
+    remote_project = f"projects/{name}"
     return source, name, remote_project
 
 
+def service_request(host, method, path, check=True, **kwargs):
+    return remote(host, "curl", "-fsS", "-X", method,
+                  f"http://127.0.0.1:{API_PORT}/{path}", check=check, **kwargs)
+
+
+def rsync_command(options, *args):
+    env = os.environ.copy()
+    env["RSYNC_CONNECT_PROG"] = f"ssh {options.host} nc 127.0.0.1 {RSYNC_PORT}"
+    return checked(["rsync", *args], env=env)
+
+
+def daemon_url(path):
+    return f"rsync://localhost/pipforge/{path}"
+
+
 def prepare(options, remote_project):
-    worker = Path(__file__).resolve()
-    remote(options.host, "mkdir", "-p", options.root)
-    checked(["rsync", "-a", str(worker), f"{options.host}:{options.root}/worker.py"])
-    remote(options.host, "python3", f"{options.root}/worker.py", "worker-prepare", remote_project)
+    health = service_request(options.host, "GET", "health", capture_output=True, text=True)
+    service_root = json.loads(health.stdout)["root"]
+    if service_root != options.root:
+        fail(f"Mac service uses {service_root}, not {options.root}")
+    service_request(options.host, "POST", f"prepare/{remote_project.rsplit('/', 1)[-1]}")
 
 
 def sync(options, source, remote_project):
-    command = ["rsync", "-a", "--delete", "--filter=:- .gitignore"]
+    command = ["-a", "--delete", "--filter=:- .gitignore"]
     if options.checksum:
         command.append("--checksum")
     if options.dry_run:
         command.extend(("--dry-run", "--itemize-changes"))
     for pattern in EXCLUDES:
         command.extend(("--exclude", pattern))
-    command.extend((f"{source}/", f"{options.host}:{remote_project}/source/"))
-    print(f"Syncing {source} to {options.host}:{remote_project}/source", flush=True)
-    checked(command)
+    command.extend((f"{source}/", daemon_url(f"{remote_project}/source/")))
+    print(f"Syncing {source} to {options.host}:{options.root}/{remote_project}/source", flush=True)
+    rsync_command(options, *command)
 
 
 def client_doctor(options):
@@ -89,10 +114,12 @@ def client_doctor(options):
             fail(f"Missing local command: {program}")
     remote(options.host, "xcodebuild", "-version", timeout=20)
     remote(options.host, "xcrun", "--sdk", "iphoneos", "--show-sdk-version", timeout=20)
-    probe = "from pathlib import Path; import sys; p = Path(sys.argv[1]); p.write_text('ok'); p.unlink()"
-    remote(options.host, "mkdir", "-p", options.root, timeout=20)
-    remote(options.host, "python3", "-c", probe, f"{options.root}/.write-probe", timeout=20)
-    remote(options.host, "df", "-h", options.root, timeout=20)
+    health = service_request(options.host, "GET", "health", capture_output=True, text=True)
+    # The service owns the storage root; a client flag cannot silently redirect it.
+    service_root = json.loads(health.stdout)["root"]
+    if service_root != options.root:
+        fail(f"Mac service uses {service_root}, not {options.root}")
+    print(f"Mac service: {service_root} (rsync ready)")
 
 
 def worker_prepare(project):
@@ -126,12 +153,16 @@ def worker_build(project, job):
     project = Path(project)
     if not re.fullmatch(r"[0-9TZ-]+[a-f0-9]{6}", job):
         fail("Invalid job ID")
-    recipe = project / "source" / "ios-build.sh"
-    if not recipe.is_file():
-        fail(f"Missing recipe: {recipe}")
     run_dir = project / "runs" / job
     run_dir.mkdir(parents=True, exist_ok=False)
     log_path = run_dir / "build.log"
+    recipe = project / "source" / "ios-build.sh"
+    if not recipe.is_file():
+        message = f"Missing recipe: {recipe}"
+        log_path.write_text(message + "\n")
+        (run_dir / "result.json").write_text(json.dumps({"job": job, "exit_code": 1, "artifacts": []}) + "\n")
+        print(message, file=sys.stderr)
+        return 1
     env = os.environ.copy()
     env.update({
         "PIPFORGE_ARTIFACT_DIR": str(run_dir),
@@ -168,6 +199,61 @@ def worker_build(project, job):
     return code
 
 
+def mac_service(root):
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=root) as probe:
+        probe.write(b"ok")
+        probe.flush()
+    config = root / "rsyncd.conf"
+    config.write_text(f"[pipforge]\npath = {root}\nread only = no\nuse chroot = no\nlist = no\nhosts allow = 127.0.0.1\n")
+    daemon = subprocess.Popen(["/usr/bin/rsync", "--daemon", "--no-detach",
+                               "--address=127.0.0.1", f"--port={RSYNC_PORT}",
+                               f"--config={config}"], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.STDOUT)
+
+    class Handler(BaseHTTPRequestHandler):
+        def respond(self, status, data):
+            body = (json.dumps(data) + "\n").encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def handle_request(self, method):
+            pieces = self.path.strip("/").split("/")
+            try:
+                if method == "GET" and pieces == ["health"]:
+                    if daemon.poll() is not None:
+                        fail("rsync service stopped")
+                    with tempfile.NamedTemporaryFile(dir=root) as probe:
+                        probe.write(b"ok")
+                        probe.flush()
+                    self.respond(200, {"root": str(root), "rsync": "ready"})
+                elif method == "POST" and len(pieces) == 2 and pieces[0] == "prepare" and SAFE_NAME.fullmatch(pieces[1]):
+                    worker_prepare(root / "projects" / pieces[1])
+                    self.respond(200, {"prepared": pieces[1]})
+                elif method == "POST" and len(pieces) == 3 and pieces[0] == "build" and SAFE_NAME.fullmatch(pieces[1]):
+                    code = worker_build(root / "projects" / pieces[1], pieces[2])
+                    self.respond(200, {"exit_code": code})
+                else:
+                    self.respond(404, {"error": "unknown request"})
+            except Exception as error:
+                self.respond(500, {"error": str(error)})
+
+        def do_GET(self):
+            self.handle_request("GET")
+
+        def do_POST(self):
+            self.handle_request("POST")
+
+    try:
+        ThreadingHTTPServer(("127.0.0.1", API_PORT), Handler).serve_forever()
+    finally:
+        daemon.terminate()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
@@ -179,6 +265,8 @@ def main():
             cmd.add_argument("--name", help="stable name for this Mac-side project mirror")
             cmd.add_argument("--checksum", action="store_true", help="compare file contents during sync")
             cmd.add_argument("--dry-run", action="store_true", help="show sync changes without building")
+    service = sub.add_parser("mac-service", help="run the Mac-side build and rsync service")
+    service.add_argument("--root", default=os.environ.get("PIPFORGE_REMOTE_ROOT", DEFAULT_ROOT))
     for action in ("worker-prepare", "worker-build"):
         cmd = sub.add_parser(action, help=argparse.SUPPRESS)
         cmd.add_argument("project")
@@ -192,6 +280,8 @@ def main():
             worker_prepare(options.project)
         elif options.action == "worker-build":
             return worker_build(options.project, options.job)
+        elif options.action == "mac-service":
+            mac_service(options.root)
         else:
             validate_options(options)
             source, _, remote_project = project_paths(options)
@@ -209,10 +299,10 @@ def main():
 def client_build_after_sync(options, source, remote_project):
     job = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6]
     print(f"Building on {options.host} (job {job})", flush=True)
-    result = remote(options.host, "python3", f"{options.root}/worker.py", "worker-build", remote_project, job, check=False)
+    result = service_request(options.host, "POST", f"build/{remote_project.rsplit('/', 1)[-1]}/{job}", check=False)
     destination = source / ".pipforge" / "runs" / job
     destination.mkdir(parents=True, exist_ok=True)
-    checked(["rsync", "-a", f"{options.host}:{remote_project}/runs/{job}/", f"{destination}/"])
+    rsync_command(options, "-a", daemon_url(f"{remote_project}/runs/{job}/"), f"{destination}/")
     manifest = json.loads((destination / "result.json").read_text())
     print(f"Build log: {destination / 'build.log'}")
     for artifact in manifest["artifacts"]:
