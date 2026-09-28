@@ -291,6 +291,18 @@ def worker_prepare(project):
         (project / child).mkdir(exist_ok=True)
 
 
+def clean_runs(runs):
+    """Remove only Gala's completed run artifacts, leaving source and caches."""
+    runs = Path(runs)
+    if not runs.is_dir():
+        return
+    for child in runs.iterdir():
+        if child.is_symlink() or child.is_file():
+            child.unlink()
+        elif child.is_dir():
+            shutil.rmtree(child)
+
+
 def inspect_ipas(run_dir):
     artifacts = []
     for ipa in sorted(run_dir.rglob("*.ipa")):
@@ -404,6 +416,9 @@ def mac_service(root):
                 elif method == "POST" and len(pieces) == 2 and pieces[0] == "prepare" and SAFE_NAME.fullmatch(pieces[1]):
                     worker_prepare(root / "projects" / pieces[1])
                     self.respond(200, {"prepared": pieces[1]})
+                elif method == "POST" and len(pieces) == 2 and pieces[0] == "clean" and SAFE_NAME.fullmatch(pieces[1]):
+                    clean_runs(root / "projects" / pieces[1] / "runs")
+                    self.respond(200, {"cleaned": pieces[1]})
                 elif method == "POST" and len(pieces) == 3 and pieces[0] in ("build", "test") and SAFE_NAME.fullmatch(pieces[1]):
                     code = worker_job(root / "projects" / pieces[1], pieces[2], pieces[0])
                     self.respond(200, {"exit_code": code})
@@ -498,6 +513,9 @@ def main():
             with open(lock_dir / "client.lock", "w") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 prepare(options, remote_project)
+                if options.action in ("test", "build", "run", "deliver") and not options.dry_run:
+                    service_request(options.host, "POST", f"clean/{remote_project.rsplit('/', 1)[-1]}")
+                    clean_runs(source / ".gala" / "runs")
                 sync(options, source, remote_project)
                 if options.action in ("test", "build", "run", "deliver") and not options.dry_run:
                     if options.action in ("test", "deliver") or getattr(options, "gate", False):

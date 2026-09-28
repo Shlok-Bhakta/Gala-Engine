@@ -72,7 +72,7 @@ Run the build from anywhere under the project:
 gala build
 ```
 
-Results arrive at `.gala/runs/<job-id>/` in the project. Add `.gala/` to the project's `.gitignore`.
+Results arrive at `.gala/runs/<job-id>/` in the project. Add `.gala/` to the project's `.gitignore`. Before a new test, build, run, or delivery, Gala deletes the prior run directories from both the Linux checkout and its Mac mirror. A gated invocation keeps its test and build results together until the next invocation. The Mac keeps `GALA_BUILD_DIR` and the current source mirror for incremental builds; it does not keep a history of IPAs.
 
 The Mac mirror name includes a short hash of the client hostname, checkout path, Git remote, and the project's path within that repo. Different Linux hosts and checkouts cannot overwrite each other's synced source. A lock also serializes Gala runs from the same checkout. Use `--name` only when deliberately reusing a fixed mirror; sharing a name across active clients can cause a sync collision.
 
