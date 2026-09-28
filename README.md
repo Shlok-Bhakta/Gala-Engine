@@ -1,8 +1,31 @@
 # Gala Engine
 
-Build iPhone and iPad IPAs on a Mac while working on Linux. Gala Engine syncs a project to the Mac's bulk volume, runs its `ios-build.sh` there, and copies the unsigned IPA and build log back. For delivery, the Mac signs the IPA and hosts the current build privately over Tailscale. A Home Screen web app can notify an iPhone and iPad when the update is ready.
+![Gala Engine: iOS builds from Linux](docs/assets/hero.svg)
 
-The Mac-side worker owns the build volume and listens only on `127.0.0.1`; SSH carries its control calls and rsync traffic. Tailscale Serve exposes the install page, manifest, and signed IPA only to the tailnet. There is no account, simulator, or GitHub push in the build path. Gala builds the files in your current working tree, including uncommitted edits.
+**Build iPhone and iPad apps from Linux, using your own Mac for the Apple-only steps.** One command syncs your working tree, runs your project's tests and build recipe, signs the app on the Mac, and makes the current build available on your private tailnet.
+
+```sh
+nix develop
+gala deliver
+```
+
+Gala supports SwiftUI, UIKit, C++ ports, React Native, Expo, and other projects through a small `ios-build.sh` recipe. It sends incremental source changes with rsync, reuses Mac build caches, and returns the unsigned IPA, logs, and test reports to Linux. The Mac keeps only each project's **current** signed IPA for private delivery; it does not keep a build history.
+
+| Where you work | What Gala does | Where the app goes |
+| --- | --- | --- |
+| Linux laptop or agent | Syncs current files; runs `gala test`, `build`, `run`, or `deliver` | USB install from the laptop, or private OTA install on iPhone and iPad |
+| Mac build worker | Runs project recipes with the iPhoneOS SDK; caches build intermediates; signs deliveries | Serves the current build through Tailscale |
+| iPhone or iPad | Shows current builds in the native Gala app | Opens the iOS install handoff and shows IPA transfer progress |
+
+![Illustrated preview of the native Gala app](docs/assets/native-preview.svg)
+
+*Illustrated UI preview. The native [Gala app](app/Gala/README.md) is included in this repository. The first device build awaits hands-on confirmation; the existing private web installer remains available for bootstrapping.*
+
+![Gala build and delivery flow](docs/assets/flow.svg)
+
+**Start here:** [one-time setup](#one-time-setup) · [add a project](#add-a-project) · [test and deliver](#test-gate-and-publish) · [native app](app/Gala/README.md) · [Linux device setup](#pair-and-deploy-from-the-thinkpad)
+
+The Mac worker listens only on `127.0.0.1`. SSH carries control calls and rsync; Tailscale Serve exposes the installer only within the tailnet. Gala builds your current working tree, including uncommitted edits. It needs no account, simulator, or GitHub push in the build path.
 
 ## One-time setup
 
@@ -20,7 +43,7 @@ On the Mac, turn on System Settings → General → Sharing → Remote Login, wi
 
 ```sh
 mkdir -p /Volumes/BlenderBuild/gala-engine
-git clone git@github.com:Shlok-Bhakta/Gala-Engine.git /Volumes/BlenderBuild/gala-engine-tool
+git clone https://github.com/Shlok-Bhakta/Gala-Engine.git /Volumes/BlenderBuild/gala-engine-tool
 cp /Volumes/BlenderBuild/gala-engine-tool/bin/gala /Volumes/BlenderBuild/gala-engine/service.py
 cp /Volumes/BlenderBuild/gala-engine-tool/mac/{dashboard.html,install.html,sw.js,manifest.webmanifest,icon.svg,icon-57.png,icon-512.png,webpush.js,package.json,package-lock.json} /Volumes/BlenderBuild/gala-engine/
 cd /Volumes/BlenderBuild/gala-engine
@@ -43,7 +66,7 @@ Enter the Mac login keychain password at its prompt. Do not put it in a shell ar
 Clone Gala Engine on the client and enter its Nix shell:
 
 ```sh
-git clone git@github.com:Shlok-Bhakta/Gala-Engine.git ~/Projects/Gala-Engine
+git clone https://github.com/Shlok-Bhakta/Gala-Engine.git ~/Projects/Gala-Engine
 nix develop ~/Projects/Gala-Engine
 gala doctor
 ```

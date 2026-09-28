@@ -34,7 +34,9 @@ with open(icon_path, "rb") as file:
     info.update(plistlib.load(file))
 
 server = os.environ.get("GALA_DEFAULT_SERVER", "")
-if not server:
+if server == "none":
+    server = ""
+elif not server:
     try:
         result = subprocess.run(
             ["/opt/homebrew/bin/tailscale", "status", "--json"],
