@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""Copy an iOS project to a Mac, build it there, and retrieve the IPA."""
+
+import argparse
+import datetime as dt
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import uuid
+import zipfile
+
+
+DEFAULT_ROOT = "/Volumes/BlenderBuild/pipforge"
+SAFE_PATH = re.compile(r"^/[A-Za-z0-9_./-]+$")
+SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+EXCLUDES = (
+    ".git/", ".pipforge/", ".direnv/", ".DS_Store",
+    "node_modules/", ".expo/", "DerivedData/", ".build/", "build/",
+)
+
+
+def fail(message):
+    raise RuntimeError(message)
+
+
+def checked(args, **kwargs):
+    return subprocess.run(args, check=True, **kwargs)
+
+
+def remote(host, *args, check=True, timeout=None):
+    command = " ".join(shlex.quote(str(arg)) for arg in args)
+    return subprocess.run(["ssh", host, command], check=check, timeout=timeout)
+
+
+def source_root(start):
+    for directory in (start, *start.parents):
+        if (directory / "ios-build.sh").is_file():
+            return directory
+    fail("No ios-build.sh found here or in a parent directory")
+
+
+def validate_options(options):
+    if not re.fullmatch(r"[A-Za-z0-9_.@-]+", options.host):
+        fail("Host must be a simple SSH name, such as macbook")
+    if not SAFE_PATH.fullmatch(options.root) or ".." in Path(options.root).parts:
+        fail("Remote root must be an absolute path without spaces or shell characters")
+
+
+def project_paths(options):
+    source = source_root(Path.cwd().resolve())
+    name = options.name or re.sub(r"[^a-z0-9_-]+", "-", source.name.lower()).strip("-")
+    if not SAFE_NAME.fullmatch(name):
+        fail("Project name must contain lowercase letters, digits, _ or -")
+    remote_project = f"{options.root}/projects/{name}"
+    return source, name, remote_project
+
+
+def prepare(options, remote_project):
+    worker = Path(__file__).resolve()
+    remote(options.host, "mkdir", "-p", options.root)
+    checked(["rsync", "-a", str(worker), f"{options.host}:{options.root}/worker.py"])
+    remote(options.host, "python3", f"{options.root}/worker.py", "worker-prepare", remote_project)
+
+
+def sync(options, source, remote_project):
+    command = ["rsync", "-a", "--delete", "--filter=:- .gitignore"]
+    if options.checksum:
+        command.append("--checksum")
+    if options.dry_run:
+        command.extend(("--dry-run", "--itemize-changes"))
+    for pattern in EXCLUDES:
+        command.extend(("--exclude", pattern))
+    command.extend((f"{source}/", f"{options.host}:{remote_project}/source/"))
+    print(f"Syncing {source} to {options.host}:{remote_project}/source", flush=True)
+    checked(command)
+
+
+def client_doctor(options):
+    validate_options(options)
+    for program in ("ssh", "rsync", "python3"):
+        if not shutil.which(program):
+            fail(f"Missing local command: {program}")
+    remote(options.host, "xcodebuild", "-version", timeout=20)
+    remote(options.host, "xcrun", "--sdk", "iphoneos", "--show-sdk-version", timeout=20)
+    probe = "from pathlib import Path; import sys; p = Path(sys.argv[1]); p.write_text('ok'); p.unlink()"
+    remote(options.host, "mkdir", "-p", options.root, timeout=20)
+    remote(options.host, "python3", "-c", probe, f"{options.root}/.write-probe", timeout=20)
+    remote(options.host, "df", "-h", options.root, timeout=20)
+
+
+def worker_prepare(project):
+    project = Path(project)
+    project.mkdir(parents=True, exist_ok=True)
+    for child in ("source", "build", "runs"):
+        (project / child).mkdir(exist_ok=True)
+
+
+def inspect_ipas(run_dir):
+    artifacts = []
+    for ipa in sorted(run_dir.rglob("*.ipa")):
+        if not ipa.is_file():
+            continue
+        with zipfile.ZipFile(ipa) as archive:
+            corrupt = archive.testzip()
+            if corrupt:
+                fail(f"Corrupt IPA entry in {ipa}: {corrupt}")
+            if not any(name.startswith("Payload/") and ".app/" in name for name in archive.namelist()):
+                fail(f"IPA has no Payload/*.app bundle: {ipa}")
+        sha = hashlib.sha256()
+        with ipa.open("rb") as content:
+            for chunk in iter(lambda: content.read(1024 * 1024), b""):
+                sha.update(chunk)
+        digest = sha.hexdigest()
+        artifacts.append({"path": str(ipa.relative_to(run_dir)), "sha256": digest, "bytes": ipa.stat().st_size})
+    return artifacts
+
+
+def worker_build(project, job):
+    project = Path(project)
+    if not re.fullmatch(r"[0-9TZ-]+[a-f0-9]{6}", job):
+        fail("Invalid job ID")
+    recipe = project / "source" / "ios-build.sh"
+    if not recipe.is_file():
+        fail(f"Missing recipe: {recipe}")
+    run_dir = project / "runs" / job
+    run_dir.mkdir(parents=True, exist_ok=False)
+    log_path = run_dir / "build.log"
+    env = os.environ.copy()
+    env.update({
+        "PIPFORGE_ARTIFACT_DIR": str(run_dir),
+        "PIPFORGE_BUILD_DIR": str(project / "build"),
+        "PIPFORGE_JOBS": "2",
+        "PIPFORGE_PLATFORM": "ios",
+    })
+    lock_path = project.parent.parent / "build.lock"
+    with open(lock_path, "w") as lock, open(log_path, "w", buffering=1) as log:
+        print("Waiting for the Mac build slot...", flush=True)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        print(f"Running {recipe}", flush=True)
+        process = subprocess.Popen(["bash", str(recipe)], cwd=recipe.parent, env=env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                   bufsize=1)
+        for line in process.stdout:
+            log.write(line)
+            print(line, end="", flush=True)
+        code = process.wait()
+    artifacts = []
+    if code == 0:
+        try:
+            artifacts = inspect_ipas(run_dir)
+        except (RuntimeError, OSError, zipfile.BadZipFile) as error:
+            code = 1
+            with open(log_path, "a") as log:
+                log.write(f"IPA validation failed: {error}\n")
+    if code == 0 and not artifacts:
+        code = 1
+        with open(log_path, "a") as log:
+            log.write("Recipe exited successfully but produced no IPA\n")
+    manifest = {"job": job, "exit_code": code, "artifacts": artifacts}
+    (run_dir / "result.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    return code
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="action", required=True)
+    for action in ("doctor", "sync", "build"):
+        cmd = sub.add_parser(action)
+        cmd.add_argument("--host", default=os.environ.get("PIPFORGE_HOST", "macbook"))
+        cmd.add_argument("--root", default=os.environ.get("PIPFORGE_REMOTE_ROOT", DEFAULT_ROOT))
+        if action != "doctor":
+            cmd.add_argument("--name", help="stable name for this Mac-side project mirror")
+            cmd.add_argument("--checksum", action="store_true", help="compare file contents during sync")
+            cmd.add_argument("--dry-run", action="store_true", help="show sync changes without building")
+    for action in ("worker-prepare", "worker-build"):
+        cmd = sub.add_parser(action, help=argparse.SUPPRESS)
+        cmd.add_argument("project")
+        if action == "worker-build":
+            cmd.add_argument("job")
+    options = parser.parse_args()
+    try:
+        if options.action == "doctor":
+            client_doctor(options)
+        elif options.action == "worker-prepare":
+            worker_prepare(options.project)
+        elif options.action == "worker-build":
+            return worker_build(options.project, options.job)
+        else:
+            validate_options(options)
+            source, _, remote_project = project_paths(options)
+            prepare(options, remote_project)
+            sync(options, source, remote_project)
+            if options.action == "build" and not options.dry_run:
+                # The source is already synced, so skip the duplicate sync in client_build.
+                client_build_after_sync(options, source, remote_project)
+    except (RuntimeError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, zipfile.BadZipFile) as error:
+        print(f"pipforge: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def client_build_after_sync(options, source, remote_project):
+    job = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6]
+    print(f"Building on {options.host} (job {job})", flush=True)
+    result = remote(options.host, "python3", f"{options.root}/worker.py", "worker-build", remote_project, job, check=False)
+    destination = source / ".pipforge" / "runs" / job
+    destination.mkdir(parents=True, exist_ok=True)
+    checked(["rsync", "-a", f"{options.host}:{remote_project}/runs/{job}/", f"{destination}/"])
+    manifest = json.loads((destination / "result.json").read_text())
+    print(f"Build log: {destination / 'build.log'}")
+    for artifact in manifest["artifacts"]:
+        print(f"IPA: {destination / artifact['path']}")
+        print(f"SHA-256: {artifact['sha256']}")
+    if result.returncode or manifest["exit_code"]:
+        fail(f"Build failed; inspect {destination / 'build.log'}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
