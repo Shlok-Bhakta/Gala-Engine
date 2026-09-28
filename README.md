@@ -55,6 +55,8 @@ Put one file named `ios-build.sh` at the root of the project. It runs on the Mac
 | `GALA_JOBS` | Suggested parallel job count. Defaults to 2 for this Mac. |
 | `GALA_PLATFORM` | `ios`. |
 
+Gala Engine does not detect whether a project uses CMake, Xcode, React Native, or Expo. It runs `ios-build.sh` from the mirrored project root on the Mac. The script decides every build command. Put its final unsigned IPA anywhere under `GALA_ARTIFACT_DIR`; the worker finds IPAs recursively, validates them, and sends them back with a build log and manifest. If another tool writes the IPA elsewhere, copy it into that directory in the recipe. There is no separate output-path setting.
+
 The script can call `xcodebuild`, CMake/Ninja, Expo prebuild, or other project tools. It must exit nonzero on failure and put an IPA in the artifact directory on success. Gala Engine checks the ZIP and `Payload/*.app` layout, calculates SHA-256, and returns the build log either way. Bare `gala` builds, signs, and deploys to the connected device. `gala run` does the same thing.
 
 To get `gala` from an app's own `nix develop`, add Gala Engine to that app's flake dev shell. The [SwiftTodo flake](examples/SwiftTodo/flake.nix) is a minimal example. From its directory, the daily flow is:
@@ -116,8 +118,9 @@ Gala Engine excludes Git metadata, `.gala`, Nix/Node/Expo/Xcode build directorie
 
 ## Existing projects
 
-- **Native SwiftUI/UIKit:** Put `xcodebuild` in `ios-build.sh`, set a stable `-derivedDataPath` inside `GALA_BUILD_DIR`, target `generic/platform=iOS`, and package the device `.app` as `Payload/App.app` in the IPA. The project decides whether signing happens on the Mac or later on Linux.
+- **Native SwiftUI/UIKit:** Put `xcodebuild` in `ios-build.sh`, set a stable `-derivedDataPath` inside `GALA_BUILD_DIR`, target `generic/platform=iOS`, and package the unsigned device `.app` as `Payload/App.app` in the IPA. `gala` signs the returned IPA on Linux.
 - **Blender port:** Reuse the device CMake/Ninja and `package_sideload_ipa.py` commands from its current PR preview workflow. Keep the dependency prefix and revision-matched host tools on the Mac's bulk volume. Give Gala Engine's mirror a new CMake build directory because CMake caches the source path.
+- **React Native:** Run its iOS release build through the generated Xcode workspace. The recipe handles JavaScript bundling, CocoaPods, the device `.app`, and IPA packaging. Keep DerivedData in `GALA_BUILD_DIR` and dependency caches on the Mac's bulk volume.
 - **Expo:** Prebuild the iOS project on the Mac, then run its Xcode build in `ios-build.sh`. `eas build --local` is an alternative for EAS parity, but Expo's local mode does not support caching.
 
 The Mac serializes build recipes across all Gala Engine projects, which fits its 8 GB of RAM. Source sync can happen before a build slot becomes free.
