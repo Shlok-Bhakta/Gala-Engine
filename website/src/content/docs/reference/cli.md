@@ -24,7 +24,7 @@ Run `gala` from a project directory or any of its subdirectories. Gala locates t
 
 ## Common options
 
-`--host` selects the Mac SSH alias. `--host local` uses the worker on the same Mac without SSH. `--root` selects the Mac storage root and must match the service. Source commands accept `--checksum` to compare file contents during sync and `--dry-run` to preview sync changes. `--name` chooses a fixed mirror name; avoid sharing one name across active checkouts.
+`--host` selects the Mac SSH alias. `--root` selects the Mac storage root and must match the service. Source commands accept `--checksum` to compare file contents during sync and `--dry-run` to preview sync changes. `--name` chooses a fixed mirror name; avoid sharing one name across active checkouts.
 
 `--gate` applies to `build` and `run`. `--udid` selects a USB device when more than one is connected. `--p12` and `--profile` override Linux USB signing files.
 

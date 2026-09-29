@@ -37,11 +37,12 @@ Before signing anything, the worker signs a throwaway file with a 15-second time
 
 ## Build numbers
 
-The Mac sets `CFBundleVersion` on every delivery, including in app extensions, so iOS always treats a new build as an update. The new number is one more than the highest of:
+The Mac sets `CFBundleVersion` on every delivery, including in app extensions. The new number is one more than the highest of:
 
 - the last number this project delivered,
-- the highest build of the same bundle ID currently published by any checkout, and
 - the leading number in the recipe’s own `CFBundleVersion`.
+
+The counter belongs to the Gala project mirror. If you deliver the same bundle ID from another checkout, verify the resulting build number before treating it as an update.
 
 `CFBundleShortVersionString` and `CFBundleIdentifier` are never changed.
 

@@ -19,8 +19,8 @@ The worker binds three local services:
 
 | Port | Service | Exposure |
 | --- | --- | --- |
-| `18730` | rsync daemon for source and artifacts | Localhost; reached through SSH or a local Mac client. |
-| `18731` | Worker control API | Localhost; reached through SSH or a local Mac client. |
+| `18730` | rsync daemon for source and artifacts | Localhost; reached through SSH. |
+| `18731` | Worker control API | Localhost; reached through SSH. |
 | `18732` | Private install server | Localhost; Tailscale Serve exposes `/gala` to the tailnet. |
 
 Do not make the control service, rsync daemon, or installer public. See [Security model](/reference/security/).

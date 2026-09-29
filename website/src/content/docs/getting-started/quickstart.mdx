@@ -3,7 +3,7 @@ title: Quickstart
 description: Set up the Mac build worker, connect a client, and install your first build on an iPhone or iPad.
 ---
 
-import { Steps, Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+import { Steps, Aside } from '@astrojs/starlight/components';
 
 This page takes you from a Mac with Xcode to an app on your phone. Each step links to a detailed guide if you need more.
 
@@ -33,8 +33,6 @@ You need a Mac with Xcode, an Apple development or ad hoc provisioning profile t
 
 3. **Connect a client.**
 
-    <Tabs>
-    <TabItem label="Linux (Nix)">
     Add an SSH alias for the Mac’s Tailscale name, then enter the Gala shell:
 
     ```text title="~/.ssh/config"
@@ -47,15 +45,6 @@ You need a Mac with Xcode, an Apple development or ad hoc provisioning profile t
     nix develop github:Shlok-Bhakta/Gala-Engine
     gala doctor
     ```
-    </TabItem>
-    <TabItem label="The Mac itself">
-    ```sh
-    ln -sfn /Volumes/BlenderBuild/gala-engine-tool/bin/gala ~/.local/bin/gala
-    gala doctor --host local   # Mac worker: this machine (no SSH)
-    ```
-    </TabItem>
-    </Tabs>
-
     `gala doctor` checks Xcode, the iPhoneOS SDK, the worker’s storage root, and the private install server.
 
 4. **Try the example app.** From a clone of this repository:
@@ -71,9 +60,9 @@ You need a Mac with Xcode, an Apple development or ad hoc provisioning profile t
     Install on iPhone or iPad: https://<mac-tailnet-name>/gala/swifttodo-1a2b3c4d/
     ```
 
-5. **Install on your phone.** With Tailscale connected, open `https://<mac-tailnet-name>/gala/` in Safari and tap **Install** next to SwiftTodo. Confirm the iOS prompt. The button turns into a progress ring while the Mac sends the build.
+5. **Install on your phone.** With Tailscale connected, open `https://<mac-tailnet-name>/gala/` in Safari and select SwiftTodo. Tap **Install update** on its install page and confirm the iOS prompt. The page shows transfer progress while the Mac sends the build.
 
-6. **Set up alerts.** Add the dashboard to your Home Screen and tap **Turn On**. The native Gala app can also list builds and start installs; its on-device handoff still needs hands-on confirmation. See [iPhone and iPad](/setup/devices/).
+6. **Set up alerts.** Add the dashboard to your Home Screen and tap **Enable notifications**. The native Gala app can also list builds and start installs; its on-device handoff still needs hands-on confirmation. See [iPhone and iPad](/setup/devices/).
 
 </Steps>
 

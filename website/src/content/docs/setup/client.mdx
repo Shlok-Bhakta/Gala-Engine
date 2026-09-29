@@ -1,9 +1,9 @@
 ---
 title: Client machines
-description: Install the gala command on Linux with Nix, add it to a project's dev shell, or run it on the Mac itself.
+description: Install the gala command on Linux with Nix or add it to a project's dev shell.
 ---
 
-import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 A client is any machine where you run `gala`. It needs SSH access to the Mac over Tailscale, plus `python3`, `rsync`, and `curl`. The Nix flake provides all of them, and the USB device tools on Linux.
 
@@ -68,24 +68,11 @@ gala doctor
 
 `doctor` runs `xcodebuild -version` and `xcrun --sdk iphoneos --show-sdk-version` on the Mac, confirms the worker’s storage root matches yours and that it can write there, and checks the private install server.
 
-## Run Gala on the Mac itself
-
-The Mac can be its own client. When `--host` resolves to one of the Mac’s own addresses, such as its Tailscale IP, MagicDNS name, or hostname, Gala skips SSH and talks to the local worker and rsync daemon directly. `--host local` forces this.
-
-```sh
-gala doctor
-# Mac worker: this machine (no SSH)
-```
-
-<Aside>
-Run it from a local Terminal session. Over SSH, the Mac may be unable to read projects on an external volume. See [Running on the Mac](/guides/mac-local/).
-</Aside>
-
 ## Settings
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `GALA_HOST` | `macbook` | SSH name of the Mac, or `local`. |
+| `GALA_HOST` | `macbook` | SSH name of the Mac. |
 | `GALA_REMOTE_ROOT` | `/Volumes/BlenderBuild/gala-engine` | The worker’s storage root. Must match the service. |
 
 See [Configuration](/reference/configuration/) for signing variables used by USB installs.

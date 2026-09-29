@@ -71,7 +71,6 @@ export default defineConfig({
 						{ label: 'Build recipes', slug: 'guides/recipes' },
 						{ label: 'Delivery and installs', slug: 'guides/delivery' },
 						{ label: 'The Gala app', slug: 'guides/gala-app' },
-						{ label: 'Running on the Mac', slug: 'guides/mac-local' },
 					],
 				},
 				{

@@ -5,7 +5,7 @@ description: Short answers about supported projects, devices, testing, and build
 
 ## Can I use Gala without a Mac?
 
-No. Apple device builds and Mac OTA signing use Xcode and its iPhoneOS SDK on a Mac. The client can be Linux or the Mac itself.
+No. Apple device builds and Mac OTA signing use Xcode and its iPhoneOS SDK on a Mac. The current published client workflow runs from Linux over SSH.
 
 ## Does my app need an Xcode project?
 

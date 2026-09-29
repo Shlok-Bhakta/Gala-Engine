@@ -17,7 +17,7 @@ The Mac needs a provisioning profile that covers the app bundle ID and each targ
 
 ## Install on a device
 
-Connect Tailscale on the iPhone or iPad, open the install URL returned by Gala in Safari, and tap **Install**. Confirm the iOS prompt. The private dashboard at `https://<mac-tailnet-name>/gala/` also lists current builds. You can add it to the Home Screen and enable build alerts on each device. The native Gala app can open the same installer.
+Connect Tailscale on the iPhone or iPad, open the install URL returned by Gala in Safari, and tap **Install update**. Confirm the iOS prompt. The private dashboard at `https://<mac-tailnet-name>/gala/` also lists current builds. You can add it to the Home Screen and enable build alerts on each device. The native Gala app can open the same installer.
 
 Gala measures the bytes the Mac sends while iOS downloads the IPA. It cannot see the final iOS installation result. Once the icon settles, close and reopen the app, then check its version and behavior on the device. Keep the bundle ID and signing team stable for data-preserving updates; verify that update behavior with your actual profile.
 

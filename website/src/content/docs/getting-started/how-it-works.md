@@ -15,7 +15,7 @@ When you run `gala deliver` in a project:
 4. **Sync.** rsync sends the working tree to the mirror, honoring every `.gitignore` and skipping `.git`, `.gala`, `node_modules`, `DerivedData`, `.build`, `build`, `.expo`, and `.direnv`. Uncommitted edits are included. Files you delete locally are deleted from the mirror, while `GALA_BUILD_DIR` is preserved.
 5. **Test.** The worker runs `ios-test.sh` from the mirror. A failure stops here with a nonzero exit code and the log path.
 6. **Build.** The worker waits for the Mac’s single build slot, runs `ios-build.sh`, and validates every IPA it wrote. The run directory with logs, reports, and IPAs is copied back to `.gala/runs/<job>/`.
-7. **Sign and publish.** The worker picks a matching provisioning profile and keychain identity, advances `CFBundleVersion`, signs every nested framework and extension, verifies the signature, extracts the app icon, and replaces that project’s current OTA build.
+7. **Sign and publish.** The worker picks a matching provisioning profile and keychain identity, advances `CFBundleVersion`, signs every nested framework and extension, verifies the signature, and replaces that project’s current OTA build.
 8. **Notify.** Every device that subscribed to build alerts gets a push notification. Tapping it opens the install page.
 
 `gala build` syncs and builds without the test step unless you pass `--gate`. `gala test` syncs and runs only `ios-test.sh`. `gala run` builds, then signs and installs over USB from Linux instead of publishing.
@@ -32,7 +32,7 @@ gala deliver ──ssh──▶ 127.0.0.1:18731  control API (prepare, build, pu
                                         └── tailscale serve /gala ◀──────── Gala app, Safari
 ```
 
-The Mac worker listens only on `127.0.0.1`. Clients reach the control API and rsync daemon through SSH, which runs `curl` and `nc` on the Mac. Tailscale Serve publishes the install server at `https://<mac-tailnet-name>/gala/`, inside your tailnet only. When the client is the Mac itself, Gala skips SSH and talks to localhost directly.
+The Mac worker listens only on `127.0.0.1`. Linux clients reach the control API and rsync daemon through SSH, which runs `curl` and `nc` on the Mac. Tailscale Serve publishes the install server at `https://<mac-tailnet-name>/gala/`, inside your tailnet only.
 
 ## One build slot
 
@@ -40,7 +40,7 @@ The Mac runs one recipe at a time across all projects and clients, using a lock 
 
 ## One current build per app
 
-The Mac keeps no build history. Each project has one signed `current.ipa`, which is replaced atomically by the next delivery and expires after 48 hours. When several checkouts deliver the same bundle ID, the dashboard lists only the newest one, and build numbers keep increasing across all of them.
+The Mac keeps no build history. Each project mirror has one signed `current.ipa`, which the next delivery replaces and which expires after 48 hours. Use one active project mirror per app to avoid competing deliveries for the same bundle ID.
 
 ## Install tracking
 

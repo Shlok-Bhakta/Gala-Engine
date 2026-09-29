@@ -3,7 +3,7 @@ title: The Gala app
 description: Use the native iPhone and iPad companion or the web dashboard to open private installs.
 ---
 
-Gala's native iPhone and iPad app lists the newest signed build for each project, with its extracted app icon. It can request an install and hand the manifest to iOS. The web dashboard provides the first install path and Home Screen build alerts. Both talk to the Mac's private Tailscale installer.
+Gala's native iPhone and iPad app lists signed builds from the Mac. It can request an install and hand the manifest to iOS. The web dashboard provides the first install path and Home Screen build alerts. Both talk to the Mac's private Tailscale installer.
 
 The native app targets iOS and iPadOS 26 or later. Its source is in [`app/Gala`](https://github.com/Shlok-Bhakta/Gala-Engine/tree/main/app/Gala). The current native build has been compiled and delivered through Gala; the direct on-device installation handoff still needs hands-on verification. Use the web installer if iOS rejects the native handoff.
 

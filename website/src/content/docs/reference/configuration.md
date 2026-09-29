@@ -7,7 +7,7 @@ Gala uses command flags and a few environment variables. A client and the Mac wo
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `GALA_HOST` or `--host` | `macbook` | SSH alias for the Mac; `local` uses a worker on this Mac. |
+| `GALA_HOST` or `--host` | `macbook` | SSH alias for the Mac. |
 | `GALA_REMOTE_ROOT` or `--root` | `/Volumes/BlenderBuild/gala-engine` | Mac root for mirrors, caches, signed IPAs, and push state. |
 | `GALA_P12` or `--p12` | `~/.config/gala-engine/development.p12` | Linux USB signing certificate and private key. |
 | `GALA_PROFILE` or `--profile` | `~/.config/gala-engine/development.mobileprovision` | Matching Linux USB provisioning profile. |
