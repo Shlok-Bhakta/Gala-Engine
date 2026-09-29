@@ -134,6 +134,12 @@ nav.sidebar a[aria-current='page'] {
 	border: 1px solid var(--sl-color-hairline-light);
 	box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
 }
+.sl-markdown-content img.phone-shot {
+	display: block;
+	width: min(100%, 21rem);
+	height: auto;
+	margin-inline: auto;
+}
 .sl-markdown-content .shots {
 	display: flex;
 	flex-wrap: wrap;
