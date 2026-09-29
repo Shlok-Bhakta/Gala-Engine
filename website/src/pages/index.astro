@@ -1,0 +1,670 @@
+---
+import icon from '../assets/gala-icon.svg?url';
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const docs = (path: string) => `${base}/${path}/`;
+const github = 'https://github.com/Shlok-Bhakta/Gala-Engine';
+const title = 'Gala Engine · Build iPhone and iPad apps from Linux';
+const description =
+	'Gala builds iPhone and iPad apps on your own Mac, then signs and serves the current build to devices on your private tailnet.';
+
+const toolchains = ['SwiftUI', 'UIKit', 'Xcode projects', 'React Native', 'Expo', 'CMake · C++'];
+
+const features = [
+	{
+		title: 'Incremental sync',
+		body: 'rsync sends only what changed in your working tree, including uncommitted edits. No commits, pushes, or CI queue in the loop.',
+		icon: 'M4 12a8 8 0 0 1 13.7-5.6L20 8.7M20 4v4.7h-4.7M20 12a8 8 0 0 1-13.7 5.6L4 15.3M4 20v-4.7h4.7',
+	},
+	{
+		title: 'Your Mac, warm caches',
+		body: 'Builds run on a Mac you own, with DerivedData, CMake, and dependency caches kept between runs on its bulk volume.',
+		icon: 'M4 5h16v11H4zM2 19h20M9 16v3M15 16v3',
+	},
+	{
+		title: 'Tests gate every delivery',
+		body: 'gala deliver runs your ios-test.sh first. A failing test never reaches a phone, and the full log comes back to you.',
+		icon: 'M9 12l2 2 4-4M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z',
+	},
+	{
+		title: 'One tap to install',
+		body: 'The Gala app lists current builds and starts the iOS install handoff. Its progress ring shows the IPA bytes served by the Mac.',
+		icon: 'M12 4v11m0 0l-4-4m4 4l4-4M5 19h14',
+	},
+	{
+		title: 'Private by default',
+		body: 'The worker listens on localhost. SSH carries control, and the installer is served only inside your Tailscale network.',
+		icon: 'M7 11V8a5 5 0 0 1 10 0v3M5 11h14v10H5z',
+	},
+	{
+		title: 'Any toolchain',
+		body: 'One small ios-build.sh decides every build command. If it can make an IPA on a Mac, Gala can deliver it.',
+		icon: 'M8 7l-5 5 5 5M16 7l5 5-5 5M13.5 4l-3 16',
+	},
+];
+---
+
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+		<meta name="color-scheme" content="dark" />
+		<meta name="theme-color" content="#000000" />
+		<title>{title}</title>
+		<meta name="description" content={description} />
+		<meta property="og:title" content={title} />
+		<meta property="og:description" content={description} />
+		<meta property="og:type" content="website" />
+		<meta property="og:image" content="https://shlok-bhakta.github.io/Gala-Engine/og.png" />
+		<meta name="twitter:card" content="summary_large_image" />
+		<link rel="icon" href={`${base}/favicon.svg`} type="image/svg+xml" />
+		<link rel="canonical" href="https://shlok-bhakta.github.io/Gala-Engine/" />
+	</head>
+	<body>
+		<header class="nav">
+			<div class="nav-inner">
+				<a class="brand" href={`${base}/`}><img src={icon} alt="" width="30" height="30" />Gala</a>
+				<nav aria-label="Primary">
+					<a href={docs('getting-started/introduction')}>Docs</a>
+					<a href={docs('tutorials/first-swiftui-app')}>Tutorials</a>
+					<a href={docs('reference/cli')}>Reference</a>
+					<a class="icon-link" href={github} aria-label="GitHub">
+						<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M12 .5a11.5 11.5 0 0 0-3.6 22.4c.6.1.8-.3.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.2 1.2a11 11 0 0 1 5.8 0c2.2-1.5 3.2-1.2 3.2-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.2c0 .3.2.7.8.6A11.5 11.5 0 0 0 12 .5Z"/></svg>
+					</a>
+				</nav>
+			</div>
+		</header>
+
+		<main>
+			<section class="hero">
+				<div class="hero-copy">
+					<p class="eyebrow">Private iOS builds, on your Mac</p>
+					<h1>Build on Linux.<br /><span>Install on iPhone.</span></h1>
+					<p class="lede">
+						Gala syncs your working tree to your own Mac, tests and builds it there, then serves a signed build to registered
+						iPhone and iPad devices on your tailnet.
+					</p>
+					<div class="actions">
+						<a class="button primary" href={docs('getting-started/quickstart')}>Get started</a>
+						<a class="button glass" href={github}>View on GitHub</a>
+					</div>
+					<div class="terminal" role="img" aria-label="Terminal running gala deliver">
+						<div class="terminal-bar"><i></i><i></i><i></i><span>~/Projects/SwiftTodo</span></div>
+						<pre><code><b>$</b> gala deliver
+<em>Syncing</em> ~/Projects/SwiftTodo to macbook
+<em>Running test on macbook</em> (job …aa73aa)  <u>✓</u>
+<em>Running build on macbook</em> (job …247142) <u>✓</u>
+<em>IPA:</em> .gala/runs/…/SwiftTodo-unsigned.ipa
+<em>Install on iPhone or iPad:</em> https://mac.tailnet.ts.net/gala/…
+<em>Build notifications:</em> 2 sent to 2 subscribed devices</code></pre>
+					</div>
+				</div>
+				<div class="hero-device">
+					<div class="glow" aria-hidden="true"></div>
+					<img class="phone" src={`${base}/illustrations/app-preview.svg`} alt="Illustration of the Gala build list and transfer view on iPhone" width="1200" height="650" />
+				</div>
+			</section>
+
+			<section class="chips" aria-label="Works with">
+				<span class="chips-label">Works with</span>
+				{toolchains.map((name) => <span class="chip">{name}</span>)}
+			</section>
+
+			<section class="steps">
+				<h2>Three steps from edit to device.</h2>
+				<p class="section-lede">Your source stays in your workflow. Your Mac handles the Apple toolchain.</p>
+				<ol>
+					<li>
+						<span class="step-number">1</span>
+						<h3>Describe the build</h3>
+						<p>Add one <code>ios-build.sh</code> to your project. It runs on the Mac and writes an IPA. Gala never guesses your toolchain.</p>
+						<pre class="snippet"><code><em>#!/usr/bin/env bash</em>
+set -euo pipefail
+xcodebuild -scheme App -sdk iphoneos \
+  -derivedDataPath "$GALA_BUILD_DIR/dd" \
+  CODE_SIGNING_ALLOWED=NO build
+<em># package Payload/App.app into</em>
+<em># "$GALA_ARTIFACT_DIR/App-unsigned.ipa"</em></code></pre>
+					</li>
+					<li>
+						<span class="step-number">2</span>
+						<h3>Deliver</h3>
+						<p>Run <code>gala deliver</code>. It requires <code>ios-test.sh</code>, then builds, signs on the Mac, and publishes the current build.</p>
+						<pre class="snippet"><code><b>$</b> gala deliver
+<em>Running test on macbook</em>  <u>✓</u>
+<em>Running build on macbook</em> <u>✓</u>
+<em>Install on iPhone or iPad:</em>
+https://mac.tailnet.ts.net/gala/…</code></pre>
+					</li>
+					<li>
+						<span class="step-number">3</span>
+						<h3>Tap Install</h3>
+						<p>On a subscribed device, open the alert or the dashboard, tap Install, and confirm the iOS prompt. Gala shows transfer progress; check the app on the device after iOS finishes.</p>
+						<a class="text-link" href={docs('guides/delivery')}>Read the install guide →</a>
+					</li>
+				</ol>
+			</section>
+
+			<section class="features">
+					<h2>A short path from source to device.</h2>
+				<div class="grid">
+					{
+						features.map((feature) => (
+							<article>
+								<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+									<path d={feature.icon} />
+								</svg>
+								<h3>{feature.title}</h3>
+								<p>{feature.body}</p>
+							</article>
+						))
+					}
+				</div>
+			</section>
+
+			<section class="showcase">
+				<div class="showcase-copy">
+					<h2>Made for iPhone and iPad.</h2>
+					<p>
+						The native Gala app lists the latest build for each project and hands installation to iOS. The web dashboard
+						also works for first installs and build alerts. Both use the same private Mac installer.
+					</p>
+					<a class="text-link" href={docs('guides/gala-app')}>Meet the Gala app →</a>
+				</div>
+				<img class="ipad" src={`${base}/illustrations/flow.svg`} alt="Diagram of source sync, Mac build, and private device delivery" width="1200" height="440" loading="lazy" />
+			</section>
+
+			<section class="cta">
+				<h2>Build your first IPA.</h2>
+				<p>Set up the Mac once, add a recipe, and run <code>gala deliver</code>.</p>
+				<div class="actions">
+					<a class="button primary" href={docs('getting-started/quickstart')}>Read the quickstart</a>
+					<a class="button glass" href={docs('tutorials/first-swiftui-app')}>Follow a tutorial</a>
+				</div>
+			</section>
+		</main>
+
+		<footer class="footer">
+			<div class="footer-inner">
+				<a class="brand small" href={`${base}/`}><img src={icon} alt="" width="22" height="22" />Gala</a>
+				<nav aria-label="Footer">
+					<a href={docs('getting-started/introduction')}>Documentation</a>
+					<a href={docs('reference/security')}>Security</a>
+					<a href={docs('reference/changelog')}>Changelog</a>
+					<a href={github}>GitHub</a>
+				</nav>
+			</div>
+		</footer>
+	</body>
+</html>
+
+<style is:global>
+	:root {
+		--bg: #000;
+		--card: #111113;
+		--card-2: #1c1c1e;
+		--line: rgba(255, 255, 255, 0.09);
+		--label: #f5f5f7;
+		--secondary: rgba(235, 235, 245, 0.62);
+		--tertiary: rgba(235, 235, 245, 0.32);
+		--accent: #ff7b5c;
+		--accent-fill: #e4583a;
+		--accent-soft: rgba(255, 123, 92, 0.15);
+		--green: #7fd6a0;
+		color-scheme: dark;
+		font: 17px/1.5 -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Inter', system-ui, sans-serif;
+		color: var(--label);
+		background: var(--bg);
+		-webkit-font-smoothing: antialiased;
+	}
+	* {
+		box-sizing: border-box;
+	}
+	body {
+		margin: 0;
+		overflow-x: hidden;
+	}
+	body::before {
+		content: '';
+		position: absolute;
+		inset: 0 0 auto;
+		height: 900px;
+		z-index: -1;
+		pointer-events: none;
+		background:
+			radial-gradient(45% 60% at 85% 0%, rgba(255, 123, 92, 0.22), transparent 70%),
+			radial-gradient(45% 55% at 10% -5%, rgba(46, 125, 82, 0.28), transparent 70%);
+	}
+	a {
+		color: inherit;
+		text-decoration: none;
+	}
+	code,
+	pre {
+		font-family: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;
+	}
+	:focus-visible {
+		outline: 2px solid var(--accent);
+		outline-offset: 3px;
+		border-radius: 6px;
+	}
+
+	.nav {
+		position: sticky;
+		top: 0;
+		z-index: 10;
+		background: rgba(0, 0, 0, 0.55);
+		-webkit-backdrop-filter: blur(20px) saturate(180%);
+		backdrop-filter: blur(20px) saturate(180%);
+		border-bottom: 1px solid var(--line);
+	}
+	.nav-inner,
+	main > section,
+	.footer-inner {
+		width: min(100% - 40px, 1120px);
+		margin-inline: auto;
+	}
+	.nav-inner {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		height: 60px;
+	}
+	.brand {
+		display: inline-flex;
+		align-items: center;
+		gap: 10px;
+		font-weight: 700;
+		font-size: 19px;
+		letter-spacing: -0.01em;
+	}
+	.brand img {
+		border-radius: 22.5%;
+	}
+	.brand.small {
+		font-size: 16px;
+	}
+	.nav nav {
+		display: flex;
+		align-items: center;
+		gap: 26px;
+		font-size: 15px;
+		color: var(--secondary);
+	}
+	.nav nav a:hover {
+		color: var(--label);
+	}
+	.icon-link {
+		display: grid;
+		place-items: center;
+	}
+
+	.hero {
+		display: grid;
+		grid-template-columns: 1.15fr 0.85fr;
+		gap: 48px;
+		align-items: center;
+		padding: 88px 0 56px;
+	}
+	.eyebrow {
+		margin: 0 0 18px;
+		color: var(--accent);
+		font-size: 15px;
+		font-weight: 600;
+	}
+	h1 {
+		margin: 0;
+		font-size: clamp(44px, 6.4vw, 76px);
+		line-height: 1.02;
+		letter-spacing: -0.045em;
+		font-weight: 750;
+	}
+	h1 span {
+		background: linear-gradient(100deg, #ffb39e, var(--accent) 45%, #e4583a);
+		-webkit-background-clip: text;
+		background-clip: text;
+		color: transparent;
+	}
+	.lede {
+		max-width: 34rem;
+		margin: 24px 0 0;
+		color: var(--secondary);
+		font-size: 20px;
+		line-height: 1.5;
+	}
+	.actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 12px;
+		margin-top: 32px;
+	}
+	.button {
+		display: inline-flex;
+		align-items: center;
+		min-height: 48px;
+		padding: 0 24px;
+		border-radius: 24px;
+		font-weight: 600;
+		transition:
+			transform 0.12s,
+			background 0.15s;
+	}
+	.button:active {
+		transform: scale(0.97);
+	}
+	.button.primary {
+		background: var(--accent-fill);
+		color: #fff;
+	}
+	.button.primary:hover {
+		background: #ef6547;
+	}
+	.button.glass {
+		background: rgba(255, 255, 255, 0.08);
+		box-shadow:
+			inset 0 0.5px 0 rgba(255, 255, 255, 0.25),
+			inset 0 0 0 0.5px rgba(255, 255, 255, 0.1);
+		-webkit-backdrop-filter: blur(20px);
+		backdrop-filter: blur(20px);
+	}
+	.button.glass:hover {
+		background: rgba(255, 255, 255, 0.13);
+	}
+
+	.terminal {
+		max-width: 34rem;
+		margin-top: 40px;
+		border: 1px solid var(--line);
+		border-radius: 16px;
+		background: rgba(17, 17, 19, 0.85);
+		overflow: hidden;
+		box-shadow: 0 30px 60px rgba(0, 0, 0, 0.45);
+	}
+	.terminal-bar {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		padding: 11px 14px;
+		border-bottom: 1px solid var(--line);
+		font-size: 12px;
+		color: var(--tertiary);
+	}
+	.terminal-bar i {
+		width: 11px;
+		height: 11px;
+		border-radius: 50%;
+		background: #3a3a3e;
+	}
+	.terminal-bar span {
+		margin-left: 8px;
+	}
+	.terminal pre,
+	.snippet {
+		margin: 0;
+		padding: 16px 18px;
+		overflow-x: auto;
+		font-size: 13.5px;
+		line-height: 1.7;
+		color: #d7d7dc;
+	}
+	pre b {
+		color: var(--accent);
+		font-weight: 600;
+	}
+	pre em {
+		font-style: normal;
+		color: var(--tertiary);
+	}
+	.terminal pre em {
+		color: var(--secondary);
+	}
+	pre u {
+		text-decoration: none;
+		color: var(--green);
+	}
+
+	.hero-device {
+		position: relative;
+		display: grid;
+		place-items: center;
+	}
+	.glow {
+		position: absolute;
+		width: 80%;
+		aspect-ratio: 1;
+		border-radius: 50%;
+		background: radial-gradient(circle, rgba(255, 123, 92, 0.35), rgba(46, 125, 82, 0.15) 50%, transparent 70%);
+		filter: blur(40px);
+	}
+	.phone {
+		position: relative;
+		width: min(100%, 560px);
+		height: auto;
+		border-radius: 24px;
+		border: 1px solid var(--line);
+		box-shadow:
+			0 30px 70px rgba(0, 0, 0, 0.45);
+	}
+
+	.chips {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		justify-content: center;
+		gap: 10px;
+		padding: 8px 0 72px;
+	}
+	.chips-label {
+		margin-right: 6px;
+		color: var(--tertiary);
+		font-size: 14px;
+	}
+	.chip {
+		padding: 7px 14px;
+		border: 1px solid var(--line);
+		border-radius: 999px;
+		color: var(--secondary);
+		font-size: 14px;
+		background: rgba(255, 255, 255, 0.03);
+	}
+
+	h2 {
+		margin: 0;
+		font-size: clamp(32px, 4vw, 48px);
+		line-height: 1.1;
+		letter-spacing: -0.035em;
+		font-weight: 700;
+		text-align: center;
+	}
+	.section-lede {
+		max-width: 38rem;
+		margin: 16px auto 0;
+		color: var(--secondary);
+		font-size: 19px;
+		text-align: center;
+	}
+
+	.steps {
+		padding: 72px 0;
+	}
+	.steps ol {
+		display: grid;
+		grid-template-columns: repeat(3, 1fr);
+		gap: 18px;
+		margin: 48px 0 0;
+		padding: 0;
+		list-style: none;
+	}
+	.steps li {
+		display: flex;
+		flex-direction: column;
+		padding: 26px;
+		border: 1px solid var(--line);
+		border-radius: 28px;
+		background: var(--card);
+	}
+	.step-number {
+		display: grid;
+		place-items: center;
+		width: 32px;
+		height: 32px;
+		border-radius: 50%;
+		background: var(--accent-soft);
+		color: var(--accent);
+		font-weight: 700;
+		font-size: 15px;
+	}
+	.steps h3,
+	.features h3 {
+		margin: 16px 0 6px;
+		font-size: 20px;
+		letter-spacing: -0.02em;
+	}
+	.steps p,
+	.features p {
+		margin: 0;
+		color: var(--secondary);
+		font-size: 16px;
+	}
+	.steps li code,
+	.cta code {
+		font-size: 0.9em;
+		color: var(--label);
+	}
+	.snippet {
+		margin-top: auto;
+		transform: translateY(8px);
+		border: 1px solid var(--line);
+		border-radius: 14px;
+		background: #0a0a0b;
+		font-size: 12.5px;
+	}
+	.steps li p {
+		margin-bottom: 20px;
+	}
+	.step-shot {
+		width: 100%;
+		height: auto;
+		margin-top: auto;
+		border-radius: 18px;
+		border: 1px solid var(--line);
+	}
+
+	.features {
+		padding: 72px 0;
+	}
+	.grid {
+		display: grid;
+		grid-template-columns: repeat(3, 1fr);
+		gap: 1px;
+		margin-top: 48px;
+		border: 1px solid var(--line);
+		border-radius: 28px;
+		overflow: hidden;
+		background: var(--line);
+	}
+	.grid article {
+		padding: 30px;
+		background: #070708;
+	}
+	.grid svg {
+		color: var(--accent);
+	}
+
+	.showcase {
+		display: grid;
+		grid-template-columns: 0.8fr 1.2fr;
+		gap: 56px;
+		align-items: center;
+		padding: 72px 0;
+	}
+	.showcase h2 {
+		text-align: left;
+	}
+	.showcase p {
+		color: var(--secondary);
+		font-size: 18px;
+	}
+	.text-link {
+		color: var(--accent);
+		font-weight: 600;
+	}
+	.ipad {
+		width: 100%;
+		height: auto;
+		border-radius: 24px;
+		border: 1px solid var(--line);
+		box-shadow:
+			0 30px 70px rgba(0, 0, 0, 0.45);
+	}
+
+	.cta {
+		margin: 56px auto 96px;
+		padding: 64px 24px;
+		border: 1px solid var(--line);
+		border-radius: 36px;
+		text-align: center;
+		background:
+			radial-gradient(60% 120% at 50% 0%, rgba(255, 123, 92, 0.16), transparent 70%),
+			var(--card);
+	}
+	.cta p {
+		margin: 14px 0 0;
+		color: var(--secondary);
+		font-size: 19px;
+	}
+	.cta .actions {
+		justify-content: center;
+	}
+
+	.footer {
+		border-top: 1px solid var(--line);
+	}
+	.footer-inner {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		justify-content: space-between;
+		gap: 16px;
+		padding: 28px 0 40px;
+	}
+	.footer nav {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 22px;
+		color: var(--tertiary);
+		font-size: 14px;
+	}
+	.footer nav a:hover {
+		color: var(--label);
+	}
+
+	@media (max-width: 900px) {
+		.hero,
+		.showcase {
+			grid-template-columns: 1fr;
+		}
+		.hero {
+			padding-top: 56px;
+		}
+		.hero-device {
+			order: -1;
+		}
+		.phone {
+			width: min(100%, 560px);
+		}
+		.steps ol,
+		.grid {
+			grid-template-columns: 1fr;
+		}
+		.nav nav a:not(.icon-link):not(:first-child) {
+			display: none;
+		}
+	}
+	@media (prefers-reduced-motion: reduce) {
+		* {
+			transition: none !important;
+		}
+	}
+</style>

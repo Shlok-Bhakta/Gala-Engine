@@ -1,0 +1,49 @@
+---
+title: Introduction
+description: What Gala is, how it fits between your editor, your Mac, and your devices, and what you need to use it.
+---
+
+import { CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Gala builds iPhone and iPad apps on a Mac you own. You can write code on Linux, on the Mac itself, or through an agent. `gala deliver` sends the current working tree to the Mac, runs your test and build recipes, signs the IPA, and serves it to registered devices on your tailnet.
+
+<img class="shot wide" src="/Gala-Engine/illustrations/app-preview.svg" alt="Illustration of Gala's build list and transfer view on iPhone" />
+
+*Illustrated app preview. Confirm the installed build on the device after iOS finishes.*
+
+## The three machines
+
+| Where | What it does |
+| --- | --- |
+| **Your workstation** (Linux, another Mac, or an agent) | Runs the `gala` command. Syncs your current files, including uncommitted edits, and gets back logs, test reports, and IPAs. |
+| **The Mac build worker** | Runs your project’s `ios-test.sh` and `ios-build.sh` with the iPhoneOS SDK, keeps build caches warm, signs deliveries, and serves the current build to your tailnet. |
+| **iPhone and iPad** | Open the private installer or Gala app, then confirm the iOS install prompt. |
+
+Gala has no account, cloud service, simulator, or CI queue in the loop. Everything runs on hardware you control, connected by [Tailscale](https://tailscale.com).
+
+## What you get
+
+- **A one-command loop.** `gala deliver` syncs, tests, builds, signs, and publishes. Failures return a nonzero exit code and the full log.
+- **Any toolchain.** A small `ios-build.sh` in your project decides every build command, whether that is `xcodebuild`, `swiftc`, CMake, React Native, or Expo.
+- **Fast rebuilds.** rsync sends only changed files, and the Mac keeps DerivedData and other caches between runs.
+- **Device delivery.** The Mac signs with your development or ad hoc profile, advances the build number, and serves one current build per project. Gala shows how much of the IPA the Mac sent; iOS does not report final installation status back to Gala.
+- **Build alerts.** Devices can get a notification when a delivery succeeds. Tapping it starts the install.
+
+## What you need
+
+- A Mac with Xcode and the iPhoneOS SDK. It stays on and logged in. An external or bulk volume for build caches is recommended.
+- An Apple Developer account with a development or ad hoc provisioning profile that includes your devices, and the matching certificate with its private key in the Mac’s keychain.
+- [Tailscale](https://tailscale.com) on the Mac, your workstation, and each iPhone or iPad.
+- Python 3 and rsync on the workstation. The Nix flake provides everything, including USB device tools on Linux.
+- iOS or iPadOS 26 or later for the native Gala app. The web dashboard remains available for first installs.
+
+## What Gala does not do
+
+- **It is not an App Store pipeline.** Gala installs builds on devices in your provisioning profile. Use Xcode or Transporter for TestFlight and App Store submissions.
+- **It does not install silently.** iOS requires a user action to start an install.
+- **It does not automate device UIs.** `gala test` runs whatever your `ios-test.sh` checks on the Mac, such as type checks, unit tests, and lint. It does not drive a physical screen.
+
+<CardGrid>
+	<LinkCard title="Quickstart" description="From a fresh Mac to a build on your phone." href="/Gala-Engine/getting-started/quickstart/" />
+	<LinkCard title="How Gala works" description="Sync, build slot, signing, and delivery in detail." href="/Gala-Engine/getting-started/how-it-works/" />
+</CardGrid>

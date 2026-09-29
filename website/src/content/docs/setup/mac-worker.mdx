@@ -1,0 +1,120 @@
+---
+title: Mac build worker
+description: Install the Gala service on a Mac, keep its state on a bulk volume, and expose the installer to your tailnet.
+---
+
+import { Steps, Aside, FileTree } from '@astrojs/starlight/components';
+
+The Mac worker runs your recipes, signs deliveries, and serves installs. It is the same `bin/gala` file as the client, started by launchd in `mac-service` mode.
+
+## Requirements
+
+- Xcode with the iPhoneOS SDK. Run `xcodebuild -version` and `xcrun --sdk iphoneos --show-sdk-version` to confirm.
+- [Homebrew](https://brew.sh) with `python3`, `node@24` for Web Push, and the Tailscale CLI at `/opt/homebrew/bin/tailscale`.
+- Tailscale signed in on the Mac, with MagicDNS and HTTPS certificates enabled for your tailnet.
+- **Remote Login** turned on in System Settings → General → Sharing, for the user that runs the worker, so clients can reach it over SSH.
+- A volume with room for build caches. Gala keeps all of its state under one root, `/Volumes/BlenderBuild/gala-engine` by default.
+
+## Install
+
+<Aside type="caution">
+Install from a local session on the Mac. On some Macs, SSH sessions cannot write to external volumes even with Full Disk Access, and fail with `Interrupted system call`. The worker itself always writes locally.
+</Aside>
+
+<Steps>
+
+1. **Copy the service files onto the build volume.**
+
+    ```sh
+    git clone https://github.com/Shlok-Bhakta/Gala-Engine.git /Volumes/BlenderBuild/gala-engine-tool
+    mkdir -p /Volumes/BlenderBuild/gala-engine
+    cd /Volumes/BlenderBuild/gala-engine-tool
+    cp bin/gala /Volumes/BlenderBuild/gala-engine/service.py
+    cp mac/{dashboard.html,install.html,sw.js,manifest.webmanifest,icon.svg,icon-57.png,icon-512.png,webpush.js,package.json,package-lock.json} \
+       /Volumes/BlenderBuild/gala-engine/
+    ```
+
+2. **Install the Web Push dependency.** Build alerts use the `web-push` package. Keep npm’s cache on the volume too:
+
+    ```sh
+    cd /Volumes/BlenderBuild/gala-engine
+    npm_config_cache=/Volumes/BlenderBuild/gala-engine/npm-cache npm ci --ignore-scripts --no-audit --no-fund
+    ```
+
+3. **Start the LaunchAgent.**
+
+    ```sh
+    cp /Volumes/BlenderBuild/gala-engine-tool/mac/com.gala.engine.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.gala.engine.plist
+    ```
+
+    The agent starts at login and restarts if it exits. Its console output goes to `/dev/null`, because launchd cannot always open log files on external volumes. Each build writes its own log.
+
+4. **Expose the installer to your tailnet.**
+
+    ```sh
+    tailscale serve --bg --https=443 --set-path=/gala http://127.0.0.1:18732
+    ```
+
+    Open `https://<mac-tailnet-name>/gala/` from another device on your tailnet to check it. **Never use Tailscale Funnel for `/gala`.** It would publish your signed builds to the internet.
+
+5. **Verify from a client.**
+
+    ```sh
+    gala doctor
+    ```
+
+    ```text
+    Xcode 26.5
+    26.5
+    Mac service: /Volumes/BlenderBuild/gala-engine (rsync ready)
+    Private OTA server: ready
+    ```
+
+</Steps>
+
+## Using a different volume
+
+Every path follows the storage root. To use another location:
+
+1. Replace `/Volumes/BlenderBuild/gala-engine` in the steps above and in the plist’s `ProgramArguments`.
+2. Add `--root /your/path` after `mac-service` in the plist.
+3. Set `GALA_REMOTE_ROOT=/your/path` on every client, or pass `--root`.
+
+Clients refuse to run if their root differs from the service’s, so a typo cannot redirect builds.
+
+## What lives on the volume
+
+<FileTree>
+- /Volumes/BlenderBuild/gala-engine/
+  - service.py the worker
+  - dashboard.html, install.html, sw.js, … web installer
+  - build.lock one build at a time
+  - projects/
+    - swifttodo-1a2b3c4d/
+      - source/ synced mirror of your project
+      - build/ GALA_BUILD_DIR, kept between runs
+      - runs/ current test and build results
+      - build-number.txt
+  - ota/
+    - swifttodo-1a2b3c4d/
+      - current.ipa signed, expires after 48 hours
+      - current.json
+      - icon.png
+  - subscriptions.json build alert devices
+  - vapid.json Web Push keys
+</FileTree>
+
+See [Storage and ports](/reference/storage/) for every file.
+
+## Updating the worker
+
+Copy the new `bin/gala` over `service.py`, copy any changed files from `mac/`, and restart:
+
+```sh
+launchctl kickstart -k gui/$(id -u)/com.gala.engine
+```
+
+## Full Disk Access
+
+If `gala doctor` reports a volume access error, grant `/opt/homebrew/bin/python3` access in System Settings → Privacy & Security → Full Disk Access, then restart the agent.

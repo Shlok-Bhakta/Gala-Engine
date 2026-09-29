@@ -1,0 +1,59 @@
+---
+title: iPhone and iPad
+description: Connect devices to your tailnet, install the Gala app, and turn on build alerts.
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+
+Devices install builds from the Mac over Tailscale. There are two ways to use them, and they work together: the **Gala app** for everyday installs, and the **web dashboard** for first-time setup and build alerts.
+
+## Before you start
+
+- Install [Tailscale](https://apps.apple.com/app/tailscale/id1470499037) on the device and sign in to the same tailnet as the Mac.
+- Register the device’s UDID in your Apple Developer account and add it to the provisioning profile the Mac signs with. Builds install only on devices in that profile.
+
+## Install the Gala app
+
+<Steps>
+
+1. **Deliver the app.** From a client, in this repository:
+
+    ```sh
+    cd app/Gala
+    gala deliver
+    ```
+
+    The build embeds the Mac’s Tailscale address, so the app connects without any setup.
+
+2. **Open the dashboard in Safari** at `https://<mac-tailnet-name>/gala/`, and tap **Install** next to Gala. Confirm the iOS prompt.
+
+3. **Trust the developer if asked.** The first app from a certificate may need approval in Settings → General → VPN & Device Management.
+
+4. **Open Gala.** It lists the current build of every project. From now on, Gala updates itself like any other project: tap **Update** on its own row.
+
+</Steps>
+
+<img class="shot wide" src="/Gala-Engine/illustrations/app-preview.svg" alt="Illustration of Gala on iPhone" />
+
+## Turn on build alerts
+
+Build alerts come from the Gala web app, which iOS allows to receive push notifications once it is on your Home Screen.
+
+<Steps>
+
+1. In Safari, open `https://<mac-tailnet-name>/gala/`.
+2. Tap Share, then **Add to Home Screen**.
+3. Open Gala from the new Home Screen icon.
+4. Tap **Turn On** in the build alerts tip, or the bell button, and allow notifications.
+
+</Steps>
+
+When delivery succeeds, the Mac attempts to notify every subscribed device. Tap an alert to open the app's install page, then confirm the iOS prompt.
+
+<Aside type="note">
+Alerts are per device. Subscribe on both your iPhone and your iPad. `gala deliver` reports how many devices it notified.
+</Aside>
+
+## USB installs from Linux
+
+To install over a cable from a Linux laptop, pair the device and turn on Developer Mode. See [USB install from Linux](/tutorials/usb-install/).

@@ -1,0 +1,84 @@
+---
+title: Quickstart
+description: Set up the Mac build worker, connect a client, and install your first build on an iPhone or iPad.
+---
+
+import { Steps, Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+This page takes you from a Mac with Xcode to an app on your phone. Each step links to a detailed guide if you need more.
+
+<Aside type="tip">
+You need a Mac with Xcode, an Apple development or ad hoc provisioning profile that lists your devices, and Tailscale on every machine. See [Introduction](/getting-started/introduction/#what-you-need).
+</Aside>
+
+<Steps>
+
+1. **Install the Mac worker.** From a local session on the Mac, not over SSH, copy the service onto your build volume and start it:
+
+    ```sh
+    git clone https://github.com/Shlok-Bhakta/Gala-Engine.git /Volumes/BlenderBuild/gala-engine-tool
+    mkdir -p /Volumes/BlenderBuild/gala-engine
+    cd /Volumes/BlenderBuild/gala-engine-tool
+    cp bin/gala /Volumes/BlenderBuild/gala-engine/service.py
+    cp mac/{dashboard.html,install.html,sw.js,manifest.webmanifest,icon.svg,icon-57.png,icon-512.png,webpush.js,package.json,package-lock.json} /Volumes/BlenderBuild/gala-engine/
+    (cd /Volumes/BlenderBuild/gala-engine && npm ci --ignore-scripts --no-audit --no-fund)
+    cp mac/com.gala.engine.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.gala.engine.plist
+    tailscale serve --bg --https=443 --set-path=/gala http://127.0.0.1:18732
+    ```
+
+    Using another volume? Change the paths here and set `GALA_REMOTE_ROOT` on clients. The [Mac worker guide](/setup/mac-worker/) explains each file.
+
+2. **Check signing.** Install your provisioning profile on the Mac and make sure its certificate and private key are in the login keychain. The profile must list your devices. See [Signing and profiles](/setup/signing/).
+
+3. **Connect a client.**
+
+    <Tabs>
+    <TabItem label="Linux (Nix)">
+    Add an SSH alias for the Mac’s Tailscale name, then enter the Gala shell:
+
+    ```text title="~/.ssh/config"
+    Host macbook
+        HostName <mac-tailnet-name>
+        User <mac-user>
+    ```
+
+    ```sh
+    nix develop github:Shlok-Bhakta/Gala-Engine
+    gala doctor
+    ```
+    </TabItem>
+    <TabItem label="The Mac itself">
+    ```sh
+    ln -sfn /Volumes/BlenderBuild/gala-engine-tool/bin/gala ~/.local/bin/gala
+    gala doctor --host local   # Mac worker: this machine (no SSH)
+    ```
+    </TabItem>
+    </Tabs>
+
+    `gala doctor` checks Xcode, the iPhoneOS SDK, the worker’s storage root, and the private install server.
+
+4. **Try the example app.** From a clone of this repository:
+
+    ```sh
+    cd examples/SwiftTodo
+    gala deliver
+    ```
+
+    Gala syncs the folder, runs `ios-test.sh`, runs `ios-build.sh`, signs the IPA on the Mac, and prints an install link:
+
+    ```text
+    Install on iPhone or iPad: https://<mac-tailnet-name>/gala/swifttodo-1a2b3c4d/
+    ```
+
+5. **Install on your phone.** With Tailscale connected, open `https://<mac-tailnet-name>/gala/` in Safari and tap **Install** next to SwiftTodo. Confirm the iOS prompt. The button turns into a progress ring while the Mac sends the build.
+
+6. **Set up alerts.** Add the dashboard to your Home Screen and tap **Turn On**. The native Gala app can also list builds and start installs; its on-device handoff still needs hands-on confirmation. See [iPhone and iPad](/setup/devices/).
+
+</Steps>
+
+## Next steps
+
+- Put Gala in your own project with a [build recipe](/guides/recipes/), or follow the [first SwiftUI app tutorial](/tutorials/first-swiftui-app/).
+- Rebuild and deliver on every save with [`gala watch`](/tutorials/continuous-delivery/).
+- Read [How Gala works](/getting-started/how-it-works/) to understand where files live and what runs where.

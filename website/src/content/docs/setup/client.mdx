@@ -1,0 +1,91 @@
+---
+title: Client machines
+description: Install the gala command on Linux with Nix, add it to a project's dev shell, or run it on the Mac itself.
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+A client is any machine where you run `gala`. It needs SSH access to the Mac over Tailscale, plus `python3`, `rsync`, and `curl`. The Nix flake provides all of them, and the USB device tools on Linux.
+
+## Reach the Mac over SSH
+
+Find the Mac’s Tailscale name with `tailscale status`, then add an alias. Gala uses the alias `macbook` unless you set `GALA_HOST` or pass `--host`.
+
+```text title="~/.ssh/config"
+Host macbook
+    HostName <mac-tailnet-name>
+    User <mac-user>
+```
+
+Check it with `ssh macbook true`. Key-based login keeps agents and scripts from stalling on a password prompt.
+
+## Install the command
+
+<Tabs>
+<TabItem label="Nix dev shell">
+Enter a shell with `gala` and, on Linux, `idevicepair`, `ideviceinstaller`, `zsign`, and `lsusb`:
+
+```sh
+nix develop github:Shlok-Bhakta/Gala-Engine
+gala doctor
+```
+</TabItem>
+<TabItem label="Nix shell">
+Add just the command to your current shell:
+
+```sh
+nix shell github:Shlok-Bhakta/Gala-Engine
+```
+</TabItem>
+<TabItem label="Project flake">
+Reuse Gala’s dev shell in your app’s own `flake.nix`, so `nix develop` in the project brings `gala` with it:
+
+```nix title="flake.nix"
+{
+  inputs.gala.url = "github:Shlok-Bhakta/Gala-Engine";
+
+  outputs = { self, gala }: {
+    devShells.x86_64-linux.default = gala.devShells.x86_64-linux.default;
+  };
+}
+```
+</TabItem>
+<TabItem label="Without Nix">
+`bin/gala` is a single Python 3 file with no dependencies beyond the standard library:
+
+```sh
+git clone https://github.com/Shlok-Bhakta/Gala-Engine.git ~/Projects/Gala-Engine
+ln -sfn ~/Projects/Gala-Engine/bin/gala ~/.local/bin/gala
+```
+</TabItem>
+</Tabs>
+
+## Check the connection
+
+```sh
+gala doctor
+```
+
+`doctor` runs `xcodebuild -version` and `xcrun --sdk iphoneos --show-sdk-version` on the Mac, confirms the worker’s storage root matches yours and that it can write there, and checks the private install server.
+
+## Run Gala on the Mac itself
+
+The Mac can be its own client. When `--host` resolves to one of the Mac’s own addresses, such as its Tailscale IP, MagicDNS name, or hostname, Gala skips SSH and talks to the local worker and rsync daemon directly. `--host local` forces this.
+
+```sh
+gala doctor
+# Mac worker: this machine (no SSH)
+```
+
+<Aside>
+Run it from a local Terminal session. Over SSH, the Mac may be unable to read projects on an external volume. See [Running on the Mac](/guides/mac-local/).
+</Aside>
+
+## Settings
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `GALA_HOST` | `macbook` | SSH name of the Mac, or `local`. |
+| `GALA_REMOTE_ROOT` | `/Volumes/BlenderBuild/gala-engine` | The worker’s storage root. Must match the service. |
+
+See [Configuration](/reference/configuration/) for signing variables used by USB installs.

@@ -1,0 +1,151 @@
+/* Gala docs theme: the app's near-black surfaces, coral accent, and SF typography. */
+
+:root {
+	--gala-coral: #ff7b5c;
+	--gala-coral-fill: #e4583a;
+	--gala-forest: #2e7d52;
+
+	--sl-font: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Inter', system-ui, sans-serif;
+	--sl-font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
+
+	--sl-color-accent-low: #3b1a12;
+	--sl-color-accent: #ff7b5c;
+	--sl-color-accent-high: #ffc6b6;
+
+	--sl-color-white: #ffffff;
+	--sl-color-gray-1: #ececef;
+	--sl-color-gray-2: #c4c4c9;
+	--sl-color-gray-3: #8e8e95;
+	--sl-color-gray-4: #5a5a61;
+	--sl-color-gray-5: #2c2c30;
+	--sl-color-gray-6: #18181b;
+	--sl-color-black: #0b0b0c;
+
+	--sl-color-bg-nav: rgba(11, 11, 12, 0.72);
+	--sl-color-bg-sidebar: #0b0b0c;
+	--sl-color-hairline: #1f1f23;
+	--sl-color-hairline-light: #2c2c30;
+
+	--sl-content-width: 46rem;
+	--sl-text-h1: 2.5rem;
+}
+
+:root[data-theme='light'] {
+	--sl-color-accent-low: #ffe3da;
+	--sl-color-accent: #c9452a;
+	--sl-color-accent-high: #7d2612;
+
+	--sl-color-white: #0b0b0c;
+	--sl-color-gray-1: #1c1c1f;
+	--sl-color-gray-2: #3a3a40;
+	--sl-color-gray-3: #62626a;
+	--sl-color-gray-4: #8e8e95;
+	--sl-color-gray-5: #d4d4d8;
+	--sl-color-gray-6: #eeeef0;
+	--sl-color-gray-7: #f7f7f8;
+	--sl-color-black: #ffffff;
+
+	--sl-color-bg-nav: rgba(255, 255, 255, 0.78);
+	--sl-color-bg-sidebar: #ffffff;
+	--sl-color-hairline: #ececef;
+	--sl-color-hairline-light: #e2e2e6;
+}
+
+/* Glass header, like the app's floating toolbar. */
+header.header {
+	-webkit-backdrop-filter: blur(20px) saturate(180%);
+	backdrop-filter: blur(20px) saturate(180%);
+	border-bottom-color: var(--sl-color-hairline);
+}
+
+/* A faint coral and forest glow at the top of every page. */
+body::before {
+	content: '';
+	position: fixed;
+	inset: 0 0 auto;
+	height: 520px;
+	z-index: -1;
+	pointer-events: none;
+	background:
+		radial-gradient(55% 70% at 92% -12%, rgba(255, 123, 92, 0.14), transparent 70%),
+		radial-gradient(50% 60% at 8% -18%, rgba(46, 125, 82, 0.18), transparent 70%);
+}
+:root[data-theme='light'] body::before {
+	opacity: 0.55;
+}
+
+.site-title {
+	gap: 0.6rem;
+	font-weight: 700;
+	letter-spacing: -0.01em;
+}
+.site-title img {
+	border-radius: 22.5%;
+}
+
+.sl-markdown-content h1,
+.sl-markdown-content h2,
+.sl-markdown-content h3,
+h1#_top {
+	letter-spacing: -0.02em;
+}
+h1#_top {
+	font-weight: 750;
+}
+
+/* Sidebar: quieter group labels, coral current page. */
+nav.sidebar .group-label .large {
+	font-size: var(--sl-text-xs);
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+	color: var(--sl-color-gray-3);
+	font-weight: 650;
+}
+nav.sidebar a[aria-current='page'] {
+	font-weight: 600;
+}
+
+/* Cards and link cards: the app's rounded surfaces. */
+.card,
+.sl-link-card {
+	border-radius: 1.25rem !important;
+	border-color: var(--sl-color-hairline-light) !important;
+	background: color-mix(in srgb, var(--sl-color-gray-6) 70%, transparent) !important;
+}
+.sl-link-card:hover {
+	border-color: var(--sl-color-accent) !important;
+}
+
+.expressive-code .frame {
+	border-radius: 0.9rem !important;
+}
+.sl-markdown-content code:not(pre code) {
+	border-radius: 0.35rem;
+	padding: 0.1em 0.35em;
+}
+
+.starlight-aside {
+	border-radius: 0.9rem;
+}
+
+/* Screenshots in docs: device-like rounding and depth. */
+.sl-markdown-content img.shot {
+	border-radius: 1.6rem;
+	border: 1px solid var(--sl-color-hairline-light);
+	box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+}
+.sl-markdown-content .shots {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 1.25rem;
+	align-items: flex-start;
+	justify-content: center;
+	margin-block: 1.5rem;
+}
+.sl-markdown-content .shots img {
+	width: min(100%, 15rem);
+	margin: 0 !important;
+}
+.sl-markdown-content .shots img.wide {
+	width: min(100%, 34rem);
+}

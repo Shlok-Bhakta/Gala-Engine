@@ -1,0 +1,194 @@
+---
+title: Your first SwiftUI app
+description: Build a small SwiftUI app from an empty folder, deliver it to your iPhone, then change it and watch the update arrive.
+---
+
+import { Steps, Aside, FileTree } from '@astrojs/starlight/components';
+
+In this tutorial you write a counter app called **Tally** from scratch, with no Xcode project, and put it on your iPhone and iPad. Then you change it and deliver an update. It takes about ten minutes.
+
+**You need:** a working [Mac worker](/setup/mac-worker/), a [client](/setup/client/) where `gala doctor` passes, and a device in your provisioning profile.
+
+## 1. Create the project
+
+Make a folder with four files. Gala needs only `ios-build.sh`. The others are your app.
+
+<FileTree>
+- Tally/
+  - App.swift the app
+  - Info.plist bundle metadata
+  - ios-build.sh how the Mac builds it
+  - ios-test.sh how the Mac checks it
+  - .gitignore
+</FileTree>
+
+```swift title="App.swift"
+import SwiftUI
+
+@main
+struct TallyApp: App {
+    var body: some Scene {
+        WindowGroup { CounterView() }
+    }
+}
+
+struct CounterView: View {
+    @AppStorage("count") private var count = 0
+
+    var body: some View {
+        VStack(spacing: 32) {
+            Text("\(count)")
+                .font(.system(size: 120, weight: .bold, design: .rounded))
+                .contentTransition(.numericText())
+            HStack(spacing: 20) {
+                Button("Minus", systemImage: "minus") { count -= 1 }
+                Button("Plus", systemImage: "plus") { count += 1 }
+            }
+            .labelStyle(.iconOnly)
+            .font(.title)
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.circle)
+        }
+        .animation(.snappy, value: count)
+    }
+}
+```
+
+The bundle ID must be covered by your provisioning profile. A wildcard profile covers any ID under your team.
+
+```xml title="Info.plist"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>CFBundleExecutable</key><string>Tally</string>
+  <key>CFBundleIdentifier</key><string>com.example.tally</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleName</key><string>Tally</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>LSRequiresIPhoneOS</key><true/>
+  <key>MinimumOSVersion</key><string>18.0</string>
+  <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
+  <key>UILaunchScreen</key><dict/>
+</dict>
+</plist>
+```
+
+## 2. Write the build recipe
+
+`ios-build.sh` runs on the Mac, in the synced copy of your folder. It compiles the app with `swiftc`, lays out `Payload/Tally.app`, and zips it into an IPA in `GALA_ARTIFACT_DIR`. The IPA is unsigned; the Mac signs it when you deliver.
+
+```bash title="ios-build.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+
+sdk="$(xcrun --sdk iphoneos --show-sdk-path)"
+work="$(mktemp -d "$GALA_BUILD_DIR/tally.XXXXXX")"
+trap 'rm -rf "$work"' EXIT
+app="$work/Payload/Tally.app"
+mkdir -p "$app"
+cp Info.plist "$app/Info.plist"
+
+xcrun swiftc -sdk "$sdk" -target arm64-apple-ios18.0 \
+  -parse-as-library -module-name Tally -O \
+  -framework SwiftUI App.swift -o "$app/Tally"
+
+(cd "$work" && zip -qry "$GALA_ARTIFACT_DIR/Tally-unsigned.ipa" Payload)
+```
+
+And a test recipe, so broken code never reaches your phone:
+
+```bash title="ios-test.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+
+plutil -lint Info.plist
+xcrun swiftc -typecheck -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" \
+  -target arm64-apple-ios18.0 -parse-as-library -module-name Tally \
+  -framework SwiftUI App.swift
+```
+
+```text title=".gitignore"
+.gala/
+```
+
+Make both scripts executable:
+
+```sh
+chmod +x ios-build.sh ios-test.sh
+```
+
+## 3. Build it
+
+From anywhere inside `Tally/`:
+
+```sh
+gala build
+```
+
+```text
+Syncing /home/you/Tally to macbook:/Volumes/BlenderBuild/gala-engine/projects/tally-5e1f09ab/source
+Running build on macbook (job 20260928T235451Z-247142)
+{"exit_code": 0}
+Build log: /home/you/Tally/.gala/runs/20260928T235451Z-247142/build.log
+IPA: /home/you/Tally/.gala/runs/20260928T235451Z-247142/Tally-unsigned.ipa
+SHA-256: 25a659d1…
+```
+
+The log and the unsigned IPA are now on your machine. If the build fails, Gala exits nonzero and prints the log path. Compiler errors are in `build.log`.
+
+## 4. Deliver it
+
+```sh
+gala deliver
+```
+
+This runs `ios-test.sh`, builds, signs the app on the Mac, and publishes it:
+
+```text
+Install on iPhone or iPad: https://mac.tailnet.ts.net/gala/tally-5e1f09ab/
+Signed IPA: https://mac.tailnet.ts.net/gala/tally-5e1f09ab/current.ipa?sha256=…
+Registered devices in profile: 2
+Build notifications: 2 sent to 2 subscribed devices
+```
+
+## 5. Install it
+
+<Steps>
+
+1. Open the Gala app, or tap the build alert.
+2. Tap **Install** on the Tally row and confirm the iOS prompt.
+3. Watch the progress ring while the Mac serves the IPA. Wait for iOS to finish, then open Tally from the Home Screen and check it.
+
+</Steps>
+
+## 6. Ship a change
+
+Change the counter’s color, and deliver again:
+
+```swift title="App.swift" ins={3}
+            Text("\(count)")
+                .font(.system(size: 120, weight: .bold, design: .rounded))
+                .foregroundStyle(.orange)
+```
+
+```sh
+gala deliver
+```
+
+In Gala, Tally's button should now say **Update**. Tap it. After iOS finishes, open Tally and check that its count is still there. The Mac gave this delivery a higher build number while keeping the bundle ID.
+
+<Aside type="tip">
+Tired of typing `gala deliver`? `gala watch --action deliver` delivers after every save. See [Deliver on every save](/tutorials/continuous-delivery/).
+</Aside>
+
+## What you learned
+
+- Gala needs only `ios-build.sh`, which writes an unsigned IPA to `GALA_ARTIFACT_DIR`.
+- `ios-test.sh` gates every delivery.
+- The Mac signs, numbers, and serves each build. You never handle certificates in the recipe.
+
+Next, adapt this to [an existing Xcode project](/tutorials/xcode-project/) or read the full [recipe contract](/guides/recipes/).
