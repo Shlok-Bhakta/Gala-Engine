@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Copy an iOS project to a Mac, build it there, and retrieve the IPA."""
+"""Build iOS projects on your Mac, or sign and deliver an existing IPA privately."""
 
 import argparse
+import contextlib
 import datetime as dt
 import fcntl
+import functools
 import getpass
 import hashlib
 import html
@@ -14,6 +16,7 @@ import plistlib
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -30,6 +33,21 @@ RSYNC_PORT = 18730
 API_PORT = 18731
 OTA_PORT = 18732
 OTA_TTL_SECONDS = 48 * 60 * 60
+QUEUE_STALE_SECONDS = 120
+RUNNING_STALE_SECONDS = 300
+PROJECT_TTL_SECONDS = 21 * 24 * 60 * 60
+SIMULATOR_MAX_AGE = 12 * 60 * 60
+BUILD_HELPERS = {"xcodebuild", "swift-frontend", "XCBBuildService", "SWBBuildService", "SourceKitService"}
+REPORT_LIMITS = {"log": 50, "crash": 20, "screenshot": 20}
+RECIPE_PATH = ":".join((
+    str(Path.home() / ".local/bin"), str(Path.home() / ".bun/bin"), str(Path.home() / ".maestro/bin"),
+    "/opt/homebrew/opt/node@24/bin", "/opt/homebrew/bin", "/opt/homebrew/sbin",
+    "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin",
+))
+APNS_LOCK = threading.Lock()
+PUBLISH_LOCK = threading.Lock()
+TAILNET_LOCK = threading.Lock()
+TAILNET_CACHE = {"url": None, "until": 0}
 SAFE_PATH = re.compile(r"^/[A-Za-z0-9_./-]+$")
 SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 EXCLUDES = (
@@ -47,16 +65,44 @@ def checked(args, **kwargs):
     return subprocess.run(args, check=True, **kwargs)
 
 
+@functools.cache
+def is_local(host):
+    """True when the Mac worker is this machine, so Gala can skip SSH to itself."""
+    if host in ("local", "localhost"):
+        return True
+    if sys.platform != "darwin":
+        return False
+    resolved = subprocess.run(["ssh", "-G", host], capture_output=True, text=True, check=False)
+    target = next((line.split(None, 1)[1] for line in resolved.stdout.splitlines()
+                   if line.startswith("hostname ")), host).lower()
+    names = {"localhost", "127.0.0.1", "::1", os.uname().nodename.lower(),
+             os.uname().nodename.lower().removesuffix(".local")}
+    tailscale = subprocess.run(["/opt/homebrew/bin/tailscale", "status", "--json"],
+                               capture_output=True, text=True, check=False)
+    if tailscale.returncode == 0:
+        me = json.loads(tailscale.stdout).get("Self", {})
+        names.update(address.lower() for address in me.get("TailscaleIPs", []))
+        names.add(me.get("DNSName", "").rstrip(".").lower())
+        names.add(me.get("HostName", "").lower())
+    return target in names or target.split(".", 1)[0] in names
+
+
 def remote(host, *args, check=True, timeout=None, **kwargs):
+    if is_local(host):
+        return subprocess.run([str(arg) for arg in args], check=check, timeout=timeout, **kwargs)
     command = " ".join(shlex.quote(str(arg)) for arg in args)
-    return subprocess.run(["ssh", host, command], check=check, timeout=timeout, **kwargs)
+    # Job polling makes many short calls; share one SSH connection between them.
+    multiplex = ["-o", "ControlMaster=auto", "-o", "ControlPath=~/.ssh/gala-%C", "-o", "ControlPersist=120"]
+    return subprocess.run(["ssh", *multiplex, host, command], check=check, timeout=timeout, **kwargs)
 
 
-def source_root(start):
+def source_root(start, required=True):
     for directory in (start, *start.parents):
         if (directory / "ios-build.sh").is_file():
             return directory
-    fail("No ios-build.sh found here or in a parent directory")
+    if required:
+        fail("No ios-build.sh found here or in a parent directory")
+    return start
 
 
 def validate_options(options):
@@ -66,9 +112,9 @@ def validate_options(options):
         fail("Remote root must be an absolute path without spaces or shell characters")
 
 
-def project_paths(options):
-    source = source_root(Path.cwd().resolve())
-    stem = re.sub(r"[^a-z0-9_-]+", "-", source.name.lower()).strip("-")
+def project_paths(options, require_recipe=True):
+    source = source_root(Path.cwd().resolve(), required=require_recipe)
+    stem = re.sub(r"[^a-z0-9_-]+", "-", source.name.lower()).strip("-") or "app"
     origin = subprocess.run(["git", "-C", str(source), "config", "--get", "remote.origin.url"],
                             capture_output=True, text=True, check=False) if shutil.which("git") else None
     identity = str(source)
@@ -95,12 +141,14 @@ def service_request(host, method, path, check=True, **kwargs):
 
 def rsync_command(options, *args):
     env = os.environ.copy()
-    env["RSYNC_CONNECT_PROG"] = f"ssh {options.host} nc 127.0.0.1 {RSYNC_PORT}"
+    if not is_local(options.host):
+        env["RSYNC_CONNECT_PROG"] = f"ssh {options.host} nc 127.0.0.1 {RSYNC_PORT}"
     return checked(["rsync", *args], env=env)
 
 
 def daemon_url(path):
-    return f"rsync://localhost/gala/{path}"
+    # Over SSH, RSYNC_CONNECT_PROG replaces the connection and the port is unused.
+    return f"rsync://127.0.0.1:{RSYNC_PORT}/gala/{path}"
 
 
 def prepare(options, remote_project):
@@ -108,7 +156,7 @@ def prepare(options, remote_project):
     service_root = json.loads(health.stdout)["root"]
     if service_root != options.root:
         fail(f"Mac service uses {service_root}, not {options.root}")
-    service_request(options.host, "POST", f"prepare/{remote_project.rsplit('/', 1)[-1]}")
+    service_request(options.host, "POST", f"prepare/{remote_project.rsplit('/', 1)[-1]}", capture_output=True)
 
 
 def sync(options, source, remote_project):
@@ -179,11 +227,25 @@ def client_watch(options):
 
 def client_doctor(options):
     validate_options(options)
-    for program in ("ssh", "rsync", "python3"):
+    for program in ("rsync", "python3") if is_local(options.host) else ("ssh", "rsync", "python3"):
         if not shutil.which(program):
             fail(f"Missing local command: {program}")
+    if is_local(options.host):
+        print("Mac worker: this machine (no SSH)", flush=True)
     remote(options.host, "xcodebuild", "-version", timeout=20)
     remote(options.host, "xcrun", "--sdk", "iphoneos", "--show-sdk-version", timeout=20)
+    # Xcode 26 ships the Metal compiler as a separate download; .metal sources fail without it.
+    metal = remote(options.host, "xcrun", "-sdk", "iphoneos", "metal", "--version",
+                   check=False, capture_output=True, text=True, timeout=30)
+    if metal.returncode:
+        fail("Metal compiler missing on the Mac; run there: xcodebuild -downloadComponent MetalToolchain")
+    print("Metal compiler: ready")
+    for label, path, minimum in (("Mac internal disk", "/System/Volumes/Data", 20), ("Gala storage", options.root, 20)):
+        usage = remote(options.host, "df", "-k", path, capture_output=True, text=True, timeout=10)
+        free = int(usage.stdout.splitlines()[-1].split()[3]) / 1024 / 1024
+        print(f"{label}: {free:.0f} GB free" + (" (low; builds and Xcode updates may fail)" if free < minimum else ""))
+    jobs = service_json(options.host, "GET", "queue")["jobs"]
+    print(f"Build queue: {len(jobs)} job{'s' if len(jobs) != 1 else ''} active")
     health = service_request(options.host, "GET", "health", capture_output=True, text=True)
     # The service owns the storage root; a client flag cannot silently redirect it.
     service_root = json.loads(health.stdout)["root"]
@@ -246,7 +308,7 @@ def latest_ipa():
         fail("No Gala Engine builds found; run gala build or pass an IPA path")
     for run in sorted(runs.iterdir(), reverse=True):
         if run.is_dir():
-            ipas = [p for p in run.glob("*.ipa") if not p.stem.endswith("-signed")]
+            ipas = [p for p in run.rglob("*.ipa") if not p.stem.endswith("-signed")]
             if len(ipas) == 1:
                 return ipas[0]
             if len(ipas) > 1:
@@ -254,10 +316,14 @@ def latest_ipa():
     fail("No unsigned IPA found; run gala build or pass an IPA path")
 
 
-def client_deploy(options):
+def require_deploy_tools():
     for program in ("zsign", "ideviceinstaller"):
         if not shutil.which(program):
-            fail(f"Missing {program}; enter the Gala Engine Nix shell")
+            fail(f"Missing {program}; enter the Gala Engine Nix shell, or use gala deliver")
+
+
+def client_deploy(options):
+    require_deploy_tools()
     ipa = Path(options.ipa).expanduser().resolve() if options.ipa else latest_ipa()
     if not ipa.is_file() or ipa.suffix.lower() != ".ipa":
         fail(f"IPA not found: {ipa}")
@@ -297,6 +363,7 @@ def worker_prepare(project):
     project.mkdir(parents=True, exist_ok=True)
     for child in ("source", "build", "runs", "incoming"):
         (project / child).mkdir(exist_ok=True)
+    (project / "last-used").touch()
 
 
 def clean_runs(runs):
@@ -349,10 +416,12 @@ def signing_profiles():
                 yield path, profile, identity
 
 
-def profile_for_bundle(bundle_id):
+def profile_for_bundle(bundle_id, require_push=False):
     now = dt.datetime.now(dt.timezone.utc)
     candidates = []
     for path, profile, identity in signing_profiles():
+        if require_push and profile.get("Entitlements", {}).get("aps-environment") not in ("development", "production"):
+            continue
         expiry = profile.get("ExpirationDate")
         if expiry and expiry.replace(tzinfo=dt.timezone.utc) < now:
             continue
@@ -362,7 +431,8 @@ def profile_for_bundle(bundle_id):
         elif app_id.endswith("." + bundle_id):
             candidates.append((len(app_id) + 1000, path, profile, identity))
     if not candidates:
-        fail(f"No installed device provisioning profile and keychain identity cover {bundle_id}")
+        requirement = " with Push Notifications enabled" if require_push else ""
+        fail(f"No installed device provisioning profile{requirement} and matching keychain identity cover {bundle_id}")
     _, path, profile, identity = max(candidates, key=lambda item: item[0])
     return path, profile, identity
 
@@ -373,6 +443,34 @@ def bundle_info(bundle):
     if not bundle_id:
         fail(f"Missing CFBundleIdentifier in {bundle}")
     return info, bundle_id
+
+
+def png_width(path):
+    data = path.read_bytes()[:64]
+    offset = 8
+    # Xcode's CgBI-optimized icons put an extra chunk before IHDR.
+    while offset + 16 <= len(data):
+        length = int.from_bytes(data[offset:offset + 4], "big")
+        if data[offset + 4:offset + 8] == b"IHDR":
+            return int.from_bytes(data[offset + 8:offset + 12], "big")
+        offset += 12 + length
+    return 0
+
+
+def extract_icon(app, destination):
+    """Save the app's largest loose home screen icon as a standard PNG, if it has one."""
+    info = plistlib.loads((app / "Info.plist").read_bytes())
+    names = set(info.get("CFBundleIconFiles", []))
+    for key in ("CFBundleIcons", "CFBundleIcons~ipad"):
+        names.update(info.get(key, {}).get("CFBundlePrimaryIcon", {}).get("CFBundleIconFiles", []))
+    candidates = [path for path in app.iterdir()
+                  if path.suffix == ".png" and any(path.name.startswith(name) for name in names)]
+    if not candidates:
+        return False
+    best = max(candidates, key=png_width)
+    result = subprocess.run(["sips", "-s", "format", "png", str(best), "--out", str(destination)],
+                            capture_output=True, check=False)
+    return result.returncode == 0 and destination.is_file()
 
 
 def code_sign(arguments, timeout=300):
@@ -389,7 +487,7 @@ def code_sign(arguments, timeout=300):
 
 def sign_bundle(bundle, scratch):
     info, bundle_id = bundle_info(bundle)
-    profile_path, profile, identity = profile_for_bundle(bundle_id)
+    profile_path, profile, identity = profile_for_bundle(bundle_id, bool(info.get("GalaRequiresPush")))
     shutil.copyfile(profile_path, bundle / "embedded.mobileprovision")
     entitlements = profile["Entitlements"].copy()
     team = profile["TeamIdentifier"][0]
@@ -404,7 +502,29 @@ def sign_bundle(bundle, scratch):
     return info, len(profile["ProvisionedDevices"])
 
 
-def sign_ipa(root, ipa, counter_path=None):
+def write_json_atomic(path, data):
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
+    try:
+        temporary.write_text(json.dumps(data) + "\n")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def published_build(root, bundle_id):
+    """Highest build number currently served for this app from any client mirror."""
+    highest = 0
+    for info_file in (root / "ota").glob("*/current.json"):
+        try:
+            info = json.loads(info_file.read_text())
+        except (OSError, ValueError):
+            continue
+        if info.get("bundle_id") == bundle_id and str(info.get("version", "")).isdigit():
+            highest = max(highest, int(info["version"]))
+    return highest
+
+
+def sign_ipa(root, ipa, counter_path=None, icon_path=None, extra_info=None):
     scratch = root / "signing" / uuid.uuid4().hex
     scratch.mkdir(parents=True)
     try:
@@ -418,16 +538,24 @@ def sign_ipa(root, ipa, counter_path=None):
         build_number = None
         if counter_path:
             previous = int(counter_path.read_text()) if counter_path.is_file() else 0
+            # Another checkout may have published this app, and old mirrors and deliveries
+            # get cleaned up; never step its build number back.
+            numbers_path = root / "build-numbers.json"
+            numbers = json.loads(numbers_path.read_text()) if numbers_path.is_file() else {}
+            previous = max(previous, published_build(root, app_id), numbers.get(app_id, 0))
             original = str(app_info.get("CFBundleVersion") or "0")
             major = int(original.split(".", 1)[0]) if original.split(".", 1)[0].isdigit() else 0
             build_number = max(previous, major) + 1
             app_info["CFBundleVersion"] = str(build_number)
+        if counter_path or extra_info:
+            app_info.update(extra_info or {})
             (app / "Info.plist").write_bytes(plistlib.dumps(app_info))
+        if counter_path:
             for extension in app.rglob("*.appex"):
                 extension_info, _ = bundle_info(extension)
                 extension_info["CFBundleVersion"] = str(build_number)
                 (extension / "Info.plist").write_bytes(plistlib.dumps(extension_info))
-        _, _, identity = profile_for_bundle(app_id)
+        _, _, identity = profile_for_bundle(app_id, bool(app_info.get("GalaRequiresPush")))
         probe = scratch / "codesign-probe"
         shutil.copyfile("/bin/echo", probe)
         probe.chmod(0o755)
@@ -441,6 +569,8 @@ def sign_ipa(root, ipa, counter_path=None):
                 code_sign(["--force", "--timestamp=none", "--sign", identity, str(path)])
         info, device_count = sign_bundle(app, scratch)
         code_sign(["--verify", "--deep", "--strict", str(app)])
+        if icon_path:
+            extract_icon(app, icon_path)
         signed = scratch / "signed.ipa"
         checked(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(payload), str(signed)],
                 capture_output=True)
@@ -448,6 +578,8 @@ def sign_ipa(root, ipa, counter_path=None):
         os.replace(signed, result)
         if counter_path:
             counter_path.write_text(str(build_number) + "\n")
+            numbers[app_id] = build_number
+            write_json_atomic(numbers_path, numbers)
         return result, {
             "bundle_id": info["CFBundleIdentifier"],
             "title": info.get("CFBundleDisplayName") or info.get("CFBundleName") or app.stem,
@@ -459,65 +591,268 @@ def sign_ipa(root, ipa, counter_path=None):
         shutil.rmtree(scratch)
 
 
-def worker_job(project, job, kind):
-    project = Path(project)
-    if not re.fullmatch(r"[0-9TZ-]+[a-f0-9]{6}", job):
-        fail("Invalid job ID")
-    run_dir = project / "runs" / job
-    run_dir.mkdir(parents=True, exist_ok=False)
-    log_path = run_dir / f"{kind}.log"
-    recipe = project / "source" / f"ios-{kind}.sh"
-    if not recipe.is_file():
-        message = f"Missing recipe: {recipe}"
-        log_path.write_text(message + "\n")
-        (run_dir / "result.json").write_text(json.dumps({"job": job, "kind": kind, "exit_code": 1, "artifacts": []}) + "\n")
-        print(message, file=sys.stderr)
-        return 1
+def toolchain_identity():
+    result = subprocess.run(["xcodebuild", "-version"], capture_output=True, text=True, check=False)
+    return result.stdout.strip()
+
+
+def source_fingerprint(source):
+    """Hash the mirror's paths, sizes, and mtimes, for clients that send no fingerprint."""
+    digest = hashlib.sha256()
+    for directory, children, files in os.walk(source):
+        children.sort()
+        for name in sorted(files):
+            path = Path(directory) / name
+            try:
+                stat = path.lstat()
+            except FileNotFoundError:
+                continue
+            digest.update(f"{path.relative_to(source)}\0{stat.st_size}\0{stat.st_mtime_ns}\n".encode())
+    return digest.hexdigest()
+
+
+def job_env(root, project, run_dir, scratch):
     env = os.environ.copy()
     env.update({
         "GALA_ARTIFACT_DIR": str(run_dir),
         "GALA_BUILD_DIR": str(project / "build"),
         "GALA_JOBS": "2",
         "GALA_PLATFORM": "ios",
+        # Keep compiler scratch and module caches off the Mac's small internal disk.
+        "TMPDIR": f"{scratch}/",
+        "CLANG_MODULE_CACHE_PATH": str(root / "cache" / "clang-module-cache"),
+        "PATH": RECIPE_PATH,
     })
-    lock_path = project.parent.parent / "build.lock"
-    with open(lock_path, "w") as lock, open(log_path, "w", buffering=1) as log:
-        print("Waiting for the Mac build slot...", flush=True)
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        print(f"Running {recipe}", flush=True)
-        process = subprocess.Popen(["bash", str(recipe)], cwd=recipe.parent, env=env,
-                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                                   bufsize=1)
-        for line in process.stdout:
-            log.write(line)
-            print(line, end="", flush=True)
-        code = process.wait()
-    artifacts = []
-    if code == 0 and kind == "build":
+    return env
+
+
+def run_step(entry, command, cwd, env, step_log, output):
+    """Run one recipe in its own process group, copying output to both logs."""
+    with open(step_log, "w", buffering=1) as log:
+        process = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, text=True, bufsize=1,
+                                   errors="replace", start_new_session=True)
+        entry["process"] = process
         try:
-            artifacts = inspect_ipas(run_dir)
-        except (RuntimeError, OSError, zipfile.BadZipFile) as error:
-            code = 1
-            with open(log_path, "a") as log:
-                log.write(f"IPA validation failed: {error}\n")
-    if code == 0 and kind == "build" and not artifacts:
-        code = 1
-        with open(log_path, "a") as log:
-            log.write("Recipe exited successfully but produced no IPA\n")
-    manifest = {"job": job, "kind": kind, "exit_code": code, "artifacts": artifacts}
+            for line in process.stdout:
+                log.write(line)
+                output.write(line)
+            return process.wait()
+        except BaseException:
+            stop_process_group(process)
+            raise
+        finally:
+            process.stdout.close()
+            entry["process"] = None
+
+
+def stop_process_group(process):
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+
+
+def run_job(root, entry):
+    """Run a queued job's steps back to back in one build slot."""
+    project = root / "projects" / entry["project"]
+    run_dir = project / "runs" / entry["job"]
+    run_dir.mkdir(parents=True, exist_ok=True)
+    scratch = root / "tmp" / entry["job"]
+    scratch.mkdir(parents=True, exist_ok=True)
+    source = project / "source"
+    env = job_env(root, project, run_dir, scratch)
+    timings, skipped, code, artifacts = entry["timings"], entry["skipped"], 0, []
+    pass_file = project / "test-pass.json"
+    with open(run_dir / "output.log", "w", buffering=1, errors="replace") as output:
+        try:
+            for step in entry["steps"]:
+                if entry["cancelled"]:
+                    code = 130
+                    break
+                if step == "exec":
+                    command, step_log = ["bash", "-c", entry["command"]], run_dir / "exec.log"
+                else:
+                    recipe = source / f"ios-{step}.sh"
+                    command, step_log = ["bash", str(recipe)], run_dir / f"{step}.log"
+                    if not recipe.is_file():
+                        output.write(f"Missing recipe: {recipe}\n")
+                        step_log.write_text(f"Missing recipe: {recipe}\n")
+                        code = 1
+                        break
+                fingerprint = None
+                if step == "test":
+                    tree = entry["fingerprint"] or source_fingerprint(source)
+                    fingerprint = hashlib.sha256(f"{tree}\0{toolchain_identity()}".encode()).hexdigest()
+                if step == "test" and not entry["retest"] and pass_file.is_file():
+                    previous = json.loads(pass_file.read_text())
+                    if previous.get("fingerprint") == fingerprint:
+                        output.write(f"Tests skipped: source unchanged since passing run {previous['job']}\n")
+                        skipped.append("test")
+                        continue
+                output.write(f"==> {step}\n")
+                started = time.monotonic()
+                step_code = run_step(entry, command, source, env, step_log, output)
+                timings[step] = round(time.monotonic() - started, 1)
+                if step == "test" and step_code == 0:
+                    pass_file.write_text(json.dumps({"fingerprint": fingerprint, "job": entry["job"]}) + "\n")
+                if step_code:
+                    code = 130 if entry["cancelled"] else step_code
+                    output.write(f"{step} failed with exit code {step_code}\n")
+                    break
+            if code == 0 and "build" in entry["steps"]:
+                try:
+                    artifacts = inspect_ipas(run_dir)
+                    if not artifacts:
+                        fail("Recipe exited successfully but produced no IPA")
+                except (RuntimeError, OSError, zipfile.BadZipFile) as error:
+                    code = 1
+                    output.write(f"IPA validation failed: {error}\n")
+                    with open(run_dir / "build.log", "a") as log:
+                        log.write(f"IPA validation failed: {error}\n")
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+    # "kind" keeps older clients and the publish check working.
+    manifest = {"job": entry["job"], "kind": entry["steps"][-1], "steps": entry["steps"], "exit_code": code,
+                "artifacts": artifacts, "timings": timings, "skipped": skipped}
     (run_dir / "result.json").write_text(json.dumps(manifest, indent=2) + "\n")
     return code
 
 
-def worker_build(project, job):
-    return worker_job(project, job, "build")
+class JobQueue:
+    """Run one job at a time across every project; the Mac has 8 GB of RAM."""
 
+    def __init__(self, root):
+        self.root = root
+        self.lock = threading.Condition()
+        self.jobs = {}
+        self.waiting = []
+        self.current = None
+        threading.Thread(target=self.work, daemon=True).start()
 
-def worker_test(project, job):
-    return worker_job(project, job, "test")
+    def submit(self, project, job, steps, command=None, retest=False, fingerprint=None):
+        if not re.fullmatch(r"[0-9TZ-]+[a-f0-9]{6}", job):
+            fail("Invalid job ID")
+        if not steps or any(step not in ("test", "build", "exec") for step in steps):
+            fail("Invalid job steps")
+        if ("exec" in steps) != bool(command):
+            fail("An exec job needs exactly one command")
+        if not (self.root / "projects" / project / "source").is_dir():
+            fail(f"Unknown project {project}; sync it first")
+        (self.root / "projects" / project / "last-used").touch()
+        now = time.time()
+        with self.lock:
+            if job in self.jobs:
+                fail("Duplicate job ID")
+            self.jobs[job] = {"project": project, "job": job, "steps": steps, "command": command,
+                              "retest": retest, "fingerprint": fingerprint,
+                              "state": "queued", "submitted": now, "seen": now,
+                              "process": None, "cancelled": False, "exit_code": None,
+                              "timings": {}, "skipped": []}
+            self.waiting.append(job)
+            self.lock.notify_all()
+            return self.describe(self.jobs[job])
+
+    def describe(self, entry):
+        """Summarize a job; the caller holds the lock."""
+        now = time.time()
+        state = {key: entry[key] for key in ("project", "job", "steps", "state", "exit_code", "timings", "skipped")}
+        if entry["state"] == "queued":
+            state["ahead"] = self.waiting.index(entry["job"]) + (1 if self.current else 0)
+            state["waited"] = round(now - entry["submitted"], 1)
+        else:
+            state["ahead"] = 0
+            state["waited"] = round(entry.get("started", now) - entry["submitted"], 1)
+        if entry["state"] == "running":
+            state["running_for"] = round(now - entry["started"], 1)
+        if self.current and entry["job"] != self.current:
+            running = self.jobs[self.current]
+            state["blocked_by"] = f"{running['project']} ({'+'.join(running['steps'])})"
+        return state
+
+    def prune(self):
+        """Drop jobs whose client stopped polling, and forget old results."""
+        now = time.time()
+        for job in list(self.waiting):
+            if self.jobs[job]["seen"] < now - QUEUE_STALE_SECONDS:
+                self.waiting.remove(job)
+                self.jobs[job].update(state="done", exit_code=130, cancelled=True, finished=now)
+        running = self.jobs.get(self.current) if self.current else None
+        if running and running["seen"] < now - RUNNING_STALE_SECONDS and running["process"]:
+            print(f"Job {self.current}: client gone for {RUNNING_STALE_SECONDS}s, stopping it", flush=True)
+            running["cancelled"] = True
+            stop_process_group(running["process"])
+        for job, entry in list(self.jobs.items()):
+            if entry["state"] == "done" and entry.get("finished", now) < now - 3600:
+                del self.jobs[job]
+
+    def status(self, job):
+        with self.lock:
+            self.prune()
+            entry = self.jobs.get(job)
+            if not entry:
+                return None
+            entry["seen"] = time.time()
+            return self.describe(entry)
+
+    def snapshot(self):
+        with self.lock:
+            self.prune()
+            active = [job for job in (self.current, *self.waiting) if job]
+            return [self.describe(self.jobs[job]) for job in active]
+
+    def cancel(self, job):
+        with self.lock:
+            entry = self.jobs.get(job)
+            if not entry or entry["state"] == "done":
+                return False
+            entry["cancelled"] = True
+            if entry["state"] == "queued":
+                self.waiting.remove(job)
+                entry.update(state="done", exit_code=130, finished=time.time())
+            elif entry["process"]:
+                stop_process_group(entry["process"])
+            self.lock.notify_all()
+            return True
+
+    def wait(self, job):
+        """Block until a job finishes, for clients that predate polling."""
+        with self.lock:
+            while self.jobs[job]["state"] != "done":
+                self.jobs[job]["seen"] = time.time()
+                self.lock.wait(timeout=5)
+            return self.jobs[job]["exit_code"]
+
+    def work(self):
+        while True:
+            with self.lock:
+                self.prune()
+                while not self.waiting:
+                    self.lock.wait(timeout=30)
+                    self.prune()
+                job = self.waiting.pop(0)
+                entry = self.jobs[job]
+                entry.update(state="running", started=time.time())
+                self.current = job
+            print(f"Job {job}: {entry['project']} {'+'.join(entry['steps'])}", flush=True)
+            try:
+                code = run_job(self.root, entry)
+            except Exception as error:
+                print(f"Job {job} crashed: {error}", flush=True)
+                code = 1
+            with self.lock:
+                entry.update(state="done", exit_code=code, finished=time.time())
+                self.current = None
+                self.lock.notify_all()
 
 
 def worker_publish(root, project_name, source):
+    # Concurrent publishes would race on build numbers and the current.* swap.
+    with PUBLISH_LOCK:
+        return publish_locked(root, project_name, source)
+
+
+def publish_locked(root, project_name, source):
     project = root / "projects" / project_name
     if source == "incoming":
         ipa = project / "incoming" / "current.ipa"
@@ -526,7 +861,7 @@ def worker_publish(root, project_name, source):
             fail("Invalid job ID")
         run = project / "runs" / source
         manifest = json.loads((run / "result.json").read_text())
-        if manifest.get("kind") != "build" or manifest.get("exit_code") != 0:
+        if "build" not in manifest.get("steps", [manifest.get("kind")]) or manifest.get("exit_code") != 0:
             fail("Only a successful build can be published")
         paths = manifest.get("artifacts", [])
         if len(paths) != 1:
@@ -538,44 +873,135 @@ def worker_publish(root, project_name, source):
         fail(f"IPA not found: {ipa}")
     signed = None
     staged = None
+    destination = root / "ota" / project_name
+    destination.mkdir(parents=True, exist_ok=True)
+    icon = destination / f".{uuid.uuid4().hex}.png"
     try:
-        signed, metadata = sign_ipa(root, ipa, project / "build-number.txt")
+        base_url = tailnet_base_url()
+        # Apps that include GalaReporter.swift post logs, screenshots, and crashes here.
+        extra_info = {"GalaReportURL": f"{base_url}/{project_name}/report"}
+    except (subprocess.CalledProcessError, KeyError, ValueError, OSError):
+        base_url, extra_info = None, None
+    try:
+        signed, metadata = sign_ipa(root, ipa, project / "build-number.txt", icon, extra_info)
         artifacts = inspect_ipas(signed.parent)
         matching = [artifact for artifact in artifacts if artifact["path"] == signed.name]
         if len(matching) != 1:
             fail("Signed IPA validation failed")
         artifact = matching[0]
-        destination = root / "ota" / project_name
-        destination.mkdir(parents=True, exist_ok=True)
         staged = destination / f".{uuid.uuid4().hex}.ipa"
         os.link(signed, staged)
         os.replace(staged, destination / "current.ipa")
-        (destination / "current.json").write_text(json.dumps({
+        if icon.is_file():
+            os.replace(icon, destination / "icon.png")
+        else:
+            (destination / "icon.png").unlink(missing_ok=True)
+        write_json_atomic(destination / "current.json", {
             "sha256": artifact["sha256"], "bytes": artifact["bytes"],
             "published_at": time.time(), **metadata,
-        }) + "\n")
+        })
     finally:
+        icon.unlink(missing_ok=True)
         if staged:
             staged.unlink(missing_ok=True)
         if signed:
             signed.unlink(missing_ok=True)
         if source == "incoming":
             ipa.unlink(missing_ok=True)
-    notifications = notify_subscribers(root, project_name, metadata)
-    return {"project": project_name, "sha256": artifact["sha256"], "bytes": artifact["bytes"],
-            "notifications": notifications, **metadata}
+    # Push results stay in the Mac's status files; the client only needs to know delivery happened.
+    try:
+        notify_subscribers(root, project_name, metadata)
+    except Exception as error:
+        print(f"Build notification failed: {error}", flush=True)
+    urls = {"install_url": f"{base_url}/{project_name}/",
+            "ipa_url": f"{base_url}/{project_name}/current.ipa?sha256={artifact['sha256']}"} if base_url else {}
+    return {"project": project_name, "sha256": artifact["sha256"], "bytes": artifact["bytes"], **urls, **metadata}
+
+
+def apns_ready(root):
+    return all((root / name).is_file() for name in
+               ("apns.js", "apns/apns-cert.pem", "apns/apns-key.pem"))
+
+
+def save_apns_subscriptions(root, entries):
+    temporary = root / f".apns-subscriptions-{uuid.uuid4().hex}.json"
+    try:
+        with open(temporary, "x", opener=lambda path, flags: os.open(path, flags, 0o600)) as output:
+            output.write(json.dumps(entries) + "\n")
+        os.replace(temporary, root / "apns-subscriptions.json")
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def register_apns(root, request):
+    token = request.get("token", "")
+    environment = request.get("environment")
+    device = request.get("device", "")
+    if (not isinstance(token, str) or not re.fullmatch(r"[a-fA-F0-9]{2,512}", token)
+            or len(token) % 2 or environment not in ("development", "production")
+            or not isinstance(device, str) or not re.fullmatch(r"[a-fA-F0-9-]{36}", device)):
+        fail("Invalid APNs registration")
+    entry = {"token": token.lower(), "environment": environment, "device": device,
+             "registered_at": time.time()}
+    path = root / "apns-subscriptions.json"
+    with APNS_LOCK:
+        current = json.loads(path.read_text()) if path.is_file() else []
+        current = [item for item in current if not
+                   (item["environment"] == environment and
+                    (item["device"] == device or item["token"] == entry["token"]))]
+        if len(current) >= 100:
+            fail("Too many APNs devices")
+        save_apns_subscriptions(root, [*current, entry])
+
+
+def notify_apns(root, payload):
+    path = root / "apns-subscriptions.json"
+    report = {"at": time.time(), "registered": 0, "sent": 0, "failed": 0}
+    try:
+        with APNS_LOCK:
+            entries = json.loads(path.read_text()) if path.is_file() else []
+        report.update({"registered": len(entries), "failed": len(entries)})
+        if not entries:
+            return report
+        result = subprocess.run(["/opt/homebrew/opt/node@24/bin/node", str(root / "apns.js"),
+                                 str(root), json.dumps(payload)],
+                                capture_output=True, text=True, timeout=30, check=False)
+        if result.returncode:
+            fail("APNs sender failed; check certificates and subscriptions")
+        parsed = json.loads(result.stdout)
+        report.update({key: parsed[key] for key in ("registered", "sent", "failed")})
+        report["reasons"] = [item["reason"] for item in parsed["results"] if item["status"] != "sent"]
+        expired = {(item["token"], item["environment"], item["registered_at"])
+                   for item in parsed["results"] if item["status"] == "expired"}
+        if expired:
+            with APNS_LOCK:
+                current = json.loads(path.read_text())
+                save_apns_subscriptions(root, [item for item in current if
+                    (item["token"], item["environment"], item["registered_at"]) not in expired])
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, RuntimeError) as error:
+        report["error"] = str(error)
+        report["failed"] = max(1, report["failed"])
+    (root / "apns-status.json").write_text(json.dumps(report) + "\n")
+    return report
 
 
 def notify_subscribers(root, project, metadata):
-    subscriptions = root / "subscriptions.json"
-    if not subscriptions.is_file():
-        return {"registered": 0, "sent": 0, "failed": 0}
     payload = {"title": f"{metadata['title']} update ready",
                "body": "Tap to install the latest Gala build.",
                "project": project, "url": f"/gala/{project}/?install=1"}
-    count = len(json.loads(subscriptions.read_text()))
-    report = {"at": time.time(), "registered": count, "sent": 0, "failed": count}
+    native = notify_apns(root, payload)
+    web = notify_web_subscribers(root, payload)
+    return {key: native.get(key, 0) + web.get(key, 0) for key in ("registered", "sent", "failed")}
+
+
+def notify_web_subscribers(root, payload):
+    subscriptions = root / "subscriptions.json"
+    if not subscriptions.is_file():
+        return {"registered": 0, "sent": 0, "failed": 0}
+    report = {"at": time.time(), "registered": 0, "sent": 0, "failed": 0}
     try:
+        count = len(json.loads(subscriptions.read_text()))
+        report.update(registered=count, failed=count)
         result = subprocess.run(["/opt/homebrew/opt/node@24/bin/node", str(root / "webpush.js"),
                                  "send", str(root), json.dumps(payload)],
                                 capture_output=True, text=True, timeout=30, check=False)
@@ -583,6 +1009,7 @@ def notify_subscribers(root, project, metadata):
         if result.returncode == 0:
             parsed = json.loads(result.stdout)
             report.update({key: parsed[key] for key in ("sent", "failed", "registered")})
+            prune_web_subscriptions(subscriptions, parsed["results"])
         else:
             report["error"] = result.stderr.strip()
     except (OSError, subprocess.TimeoutExpired, ValueError, KeyError) as error:
@@ -591,30 +1018,271 @@ def notify_subscribers(root, project, metadata):
     return {key: report.get(key, 0) for key in ("registered", "sent", "failed")}
 
 
+def prune_web_subscriptions(path, results):
+    expired = {item["endpoint"] for item in results if item.get("status") == "expired"}
+    if expired:
+        current = json.loads(path.read_text())
+        write_json_atomic(path, [item for item in current if item["subscription"]["endpoint"] not in expired])
+        os.chmod(path, 0o600)
+
+
+def ota_expired(ipa):
+    try:
+        return ipa.stat().st_mtime < time.time() - OTA_TTL_SECONDS
+    except FileNotFoundError:
+        return True
+
+
+def current_delivery(directory):
+    if ota_expired(directory / "current.ipa"):
+        return None
+    try:
+        return json.loads((directory / "current.json").read_text())
+    except (OSError, ValueError):
+        return None
+
+
 def expire_ota(root):
     ota = root / "ota"
     if not ota.is_dir():
         return
-    cutoff = time.time() - OTA_TTL_SECONDS
     for project in ota.iterdir():
         if project.is_dir() and SAFE_NAME.fullmatch(project.name):
             ipa = project / "current.ipa"
-            if ipa.is_file() and ipa.stat().st_mtime < cutoff:
-                ipa.unlink()
+            if ota_expired(ipa):
+                ipa.unlink(missing_ok=True)
                 (project / "current.json").unlink(missing_ok=True)
+                (project / "icon.png").unlink(missing_ok=True)
+            if not any(project.iterdir()):
+                project.rmdir()
 
 
-def expiration_loop(root):
+def project_last_used(project):
+    marker = project / "last-used"
+    return (marker if marker.exists() else project).stat().st_mtime
+
+
+def collect_stale_projects(root, queue=None):
+    """Remove mirrors, caches, and reports for projects no client has used in weeks."""
+    busy = {item["project"] for item in queue.snapshot()} if queue else set()
+    cutoff = time.time() - PROJECT_TTL_SECONDS
+    removed = []
+    for project in (root / "projects").glob("*"):
+        if (project.is_dir() and SAFE_NAME.fullmatch(project.name) and project.name not in busy
+                and project_last_used(project) < cutoff):
+            for path in (project, root / "ota" / project.name, root / "reports" / project.name):
+                shutil.rmtree(path, ignore_errors=True)
+            removed.append(project.name)
+    if removed:
+        print(f"Removed unused project mirrors: {', '.join(removed)}", flush=True)
+    return removed
+
+
+def prune_reports(root):
+    for project in (root / "reports").glob("*"):
+        reports = sorted(project.iterdir(), key=lambda path: path.name, reverse=True)
+        for kind, limit in REPORT_LIMITS.items():
+            for path in [path for path in reports if path.stem.endswith(f"-{kind}")][limit:]:
+                path.unlink(missing_ok=True)
+
+
+def trim_log(path, limit=20 * 1024 * 1024):
+    """Keep the newest part of the service log; launchd or nohup appends to it."""
+    try:
+        if path.stat().st_size <= limit:
+            return
+        with open(path, "r+b") as log:
+            log.seek(-limit // 2, os.SEEK_END)
+            tail = log.read()
+            log.seek(0)
+            log.write(tail)
+            log.truncate()
+    except OSError:
+        pass
+
+
+def reset_cache_for_toolchain(root):
+    cache = root / "cache"
+    marker = cache / "toolchain.txt"
+    identity = toolchain_identity()
+    if not marker.is_file() or marker.read_text() != identity:
+        shutil.rmtree(cache / "clang-module-cache", ignore_errors=True)
+        cache.mkdir(parents=True, exist_ok=True)
+        marker.write_text(identity)
+
+
+def booted_simulators():
+    result = checked(["xcrun", "simctl", "list", "devices", "booted", "-j"],
+                     capture_output=True, text=True, timeout=30)
+    return [device for devices in json.loads(result.stdout)["devices"].values()
+            for device in devices if device.get("state") == "Booted"]
+
+
+def process_snapshot(pid=None):
+    selection = ["-p", str(pid)] if pid is not None else ["-ax"]
+    result = subprocess.run(["ps", *selection, "-o", "pid=,ppid=,uid=,lstart=,time=,state=,comm="],
+                            capture_output=True, text=True, timeout=10, check=False)
+    if result.returncode and pid is None:
+        fail(f"Cannot inspect build helpers: {result.stderr.strip()}")
+    processes = []
+    for line in result.stdout.splitlines():
+        fields = line.split(None, 10)
+        if len(fields) != 11:
+            continue
+        try:
+            started = dt.datetime.strptime(" ".join(fields[3:8]), "%a %b %d %H:%M:%S %Y").timestamp()
+            processes.append({"pid": int(fields[0]), "ppid": int(fields[1]), "uid": int(fields[2]),
+                              "started": started, "cpu": fields[8], "state": fields[9], "command": fields[10]})
+        except ValueError:
+            continue
+    return processes
+
+
+def reap_idle_resources(root, queue=None):
+    """Reap old simulators and orphaned helpers while the build queue is idle."""
+    if sys.platform != "darwin":
+        return
+    # Hold the queue lock so a job cannot start between the idle check and shutdown.
+    with queue.lock if queue else contextlib.nullcontext():
+        if queue and (queue.current or queue.waiting):
+            return
+        # Signing can also use build helpers. Do not interrupt a publish.
+        if not PUBLISH_LOCK.acquire(blocking=False):
+            return
+        try:
+            reap_resources_locked(root)
+        finally:
+            PUBLISH_LOCK.release()
+
+
+def reap_resources_locked(root):
+    now = time.time()
+    marker = root / "reaper-state.json"
+    try:
+        previous = json.loads(marker.read_text()) if marker.is_file() else {}
+    except (OSError, ValueError):
+        previous = {}
+    seen = {}
+    stopped = False
+    for device in booted_simulators():
+        udid = device["udid"]
+        if not re.fullmatch(r"[A-Fa-f0-9-]{36}", udid):
+            continue
+        try:
+            booted = dt.datetime.fromisoformat(device["lastBootedAt"].replace("Z", "+00:00")).timestamp()
+        except (KeyError, ValueError, TypeError):
+            booted = previous.get("simulators", {}).get(udid, now)
+        seen[udid] = booted
+        if now - booted >= SIMULATOR_MAX_AGE:
+            result = subprocess.run(["xcrun", "simctl", "shutdown", udid],
+                                    capture_output=True, text=True, timeout=30, check=False)
+            if result.returncode == 0:
+                print(f"Reaper: shut down simulator {udid} ({device.get('name', '')}), booted {int((now - booted) / 3600)}h", flush=True)
+                seen.pop(udid)
+                stopped = True
+            else:
+                print(f"Reaper: simulator {udid} shutdown failed: {result.stderr.strip()}", flush=True)
+    # Recheck simctl before closing the app, since other sessions can boot devices.
+    close_simulator = stopped and not booted_simulators()
+    processes = process_snapshot()
+    helpers = {}
+    for process in processes:
+        if process["uid"] != os.getuid():
+            continue
+        name = Path(process["command"]).name
+        key = f"{process['pid']}:{process['started']}"
+        helper = name in BUILD_HELPERS and process["ppid"] == 1
+        if helper:
+            helpers[key] = process["cpu"]
+        idle = (helper and process["state"].startswith(("S", "I"))
+                and now - process["started"] >= SIMULATOR_MAX_AGE
+                and previous.get("helpers", {}).get(key) == process["cpu"]
+                and not any(child["ppid"] == process["pid"] and not child["state"].startswith("Z")
+                            for child in processes))
+        simulator = (close_simulator and name == "Simulator"
+                     and "Simulator.app/Contents/MacOS/Simulator" in process["command"])
+        if not (idle or simulator):
+            continue
+        # A recycled PID or newly active process must survive the scan.
+        current = process_snapshot(process["pid"])
+        if not current or any(current[0][field] != process[field]
+                              for field in ("started", "command", "ppid", "cpu")):
+            continue
+        if simulator and booted_simulators():
+            continue
+        try:
+            os.kill(process["pid"], signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        print(f"Reaper: terminated {name} PID {process['pid']}" +
+              (" after all simulators shut down" if simulator else " (orphaned, idle, older than 12h)"), flush=True)
+        helpers.pop(key, None)
+    write_json_atomic(marker, {"simulators": seen, "helpers": helpers})
+
+
+def housekeeping(root, queue=None):
+    expire_ota(root)
+    collect_stale_projects(root, queue)
+    prune_reports(root)
+    trim_log(root / "service.log")
+    try:
+        reap_idle_resources(root, queue)
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+        print(f"Resource cleanup failed: {error}", flush=True)
+
+
+def expiration_loop(root, queue):
     while True:
         time.sleep(3600)
-        expire_ota(root)
+        try:
+            housekeeping(root, queue)
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            print(f"Housekeeping failed: {error}", flush=True)
 
 
 def tailnet_base_url():
-    status = checked(["/opt/homebrew/bin/tailscale", "status", "--json"],
-                     capture_output=True, text=True)
-    hostname = json.loads(status.stdout)["Self"]["DNSName"].rstrip(".")
-    return f"https://{hostname}/gala"
+    with TAILNET_LOCK:
+        if time.monotonic() >= TAILNET_CACHE["until"]:
+            status = checked(["/opt/homebrew/bin/tailscale", "status", "--json"],
+                             capture_output=True, text=True, timeout=10)
+            hostname = json.loads(status.stdout)["Self"]["DNSName"].rstrip(".")
+            if not hostname:
+                fail("Tailscale has no DNS name")
+            TAILNET_CACHE.update(url=f"https://{hostname}/gala", until=time.monotonic() + 60)
+        return TAILNET_CACHE["url"]
+
+
+def ota_projects(root):
+    projects = []
+    for directory in (root / "ota").glob("*"):
+        info = current_delivery(directory)
+        if info is None:
+            continue
+        icon = (f"{directory.name}/icon.png?v={info['sha256'][:16]}"
+                if (directory / "icon.png").is_file() else None)
+        projects.append({"project": directory.name, "icon": icon,
+                         **{key: info[key] for key in ("title", "version", "sha256", "bytes", "published_at", "bundle_id")}})
+    projects.sort(key=lambda item: item["published_at"], reverse=True)
+    newest = {}
+    for item in projects:
+        newest.setdefault(item["bundle_id"], item)
+    return list(newest.values())
+
+
+def ota_manifest(base_url, project, info, token, has_icon):
+    ipa_url = f"{base_url}/{project}/current.ipa?sha256={info['sha256']}"
+    if re.fullmatch(r"[a-f0-9]{32}", token):
+        ipa_url += f"&attempt={token}"
+    if has_icon:
+        small = large = f"{base_url}/{project}/icon.png?v={info['sha256'][:16]}"
+    else:
+        small, large = f"{base_url}/icon-57.png", f"{base_url}/icon-512.png"
+    return plistlib.dumps({"items": [{"assets": [
+        {"kind": "software-package", "sha256": info["sha256"], "url": ipa_url},
+        {"kind": "display-image", "url": small}, {"kind": "full-size-image", "url": large}],
+        "metadata": {"bundle-identifier": info["bundle_id"], "bundle-version": info["version"],
+                     "kind": "software", "platform-identifier": "com.apple.platform.iphoneos",
+                     "title": info["title"]}}]})
 
 
 def ota_service(root):
@@ -629,15 +1297,20 @@ def ota_service(root):
     attempt_lock = threading.Lock()
     attempts = {}
 
-    def new_attempt(project, info):
-        token = uuid.uuid4().hex
+    def new_attempt(project, info, token=""):
+        # The web dashboard picks its own token so it can open itms-services
+        # inside the tap handler; Safari drops the handoff after an await.
+        if not re.fullmatch(r"[a-f0-9]{32}", token):
+            token = uuid.uuid4().hex
         with attempt_lock:
             for old, value in list(attempts.items()):
                 if value["created"] < time.time() - 3600:
                     del attempts[old]
-            attempts[token] = {"project": project, "sha256": info["sha256"],
-                               "created": time.time(), "stage": "ready",
-                               "sent": 0, "total": info["bytes"]}
+            current = attempts.get(token)
+            if not current or current["project"] != project or current["sha256"] != info["sha256"]:
+                attempts[token] = {"project": project, "sha256": info["sha256"],
+                                   "created": time.time(), "stage": "ready",
+                                   "sent": 0, "total": info["bytes"]}
         return token
 
     def install_links(base_url, project, info, token):
@@ -656,11 +1329,11 @@ def ota_service(root):
                 attempt.update(changes)
 
     class Handler(BaseHTTPRequestHandler):
-        def reply(self, status, body, content_type="application/json", head_only=False):
+        def reply(self, status, body, content_type="application/json", head_only=False, cache="no-store"):
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
+            self.send_header("Cache-Control", cache)
             self.end_headers()
             if not head_only:
                 self.wfile.write(body)
@@ -686,30 +1359,32 @@ def ota_service(root):
                 else:
                     self.reply(200, json.dumps({"publicKey": vapid}).encode(), head_only=head_only)
                 return
+            if pieces == ["apns", "config.json"]:
+                self.reply(200, json.dumps({"available": apns_ready(root)}).encode(), head_only=head_only)
+                return
             if pieces == ["projects.json"]:
-                projects = []
-                for directory in (root / "ota").glob("*"):
-                    ipa = directory / "current.ipa"
-                    info_file = directory / "current.json"
-                    if ipa.is_file() and info_file.is_file() and ipa.stat().st_mtime >= time.time() - OTA_TTL_SECONDS:
-                        info = json.loads(info_file.read_text())
-                        projects.append({"project": directory.name, "title": info["title"], "version": info["version"],
-                                         "sha256": info["sha256"], "bytes": info["bytes"],
-                                         "published_at": info["published_at"], "bundle_id": info["bundle_id"]})
-                projects.sort(key=lambda item: item["published_at"], reverse=True)
-                self.reply(200, json.dumps(projects).encode(), head_only=head_only)
+                self.reply(200, json.dumps(ota_projects(root)).encode(), head_only=head_only)
                 return
             if len(pieces) == 1:
                 pieces.append("")
-            if len(pieces) != 2 or not SAFE_NAME.fullmatch(pieces[0]) or pieces[1] not in ("current.ipa", "manifest.plist", "status.json", ""):
+            if len(pieces) != 2 or not SAFE_NAME.fullmatch(pieces[0]) or pieces[1] not in (
+                    "current.ipa", "manifest.plist", "status.json", "icon.png", ""):
                 self.send_error(404)
                 return
             project = pieces[0]
             ipa = root / "ota" / project / "current.ipa"
-            if not ipa.is_file() or ipa.stat().st_mtime < time.time() - OTA_TTL_SECONDS:
+            info = current_delivery(ipa.parent)
+            if info is None:
                 self.send_error(404)
                 return
-            info = json.loads((ipa.parent / "current.json").read_text())
+            icon = ipa.parent / "icon.png"
+            if pieces[1] == "icon.png":
+                if not icon.is_file():
+                    self.send_error(404)
+                    return
+                # Icon URLs carry the build hash, so a new build gets a new URL.
+                self.reply(200, icon.read_bytes(), "image/png", head_only, "private, max-age=604800")
+                return
             if pieces[1] == "status.json":
                 with attempt_lock:
                     attempt = attempts.get(token)
@@ -732,31 +1407,27 @@ def ota_service(root):
                     self.send_error(503, "Tailscale is not ready")
                     return
                 if pieces[1] == "manifest.plist":
-                    if not head_only:
+                    if not head_only and re.fullmatch(r"[a-f0-9]{32}", token):
+                        new_attempt(project, info, token)
                         update_attempt(token, project, info["sha256"], stage="manifest")
-                    ipa_url = f"{base_url}/{project}/current.ipa?sha256={info['sha256']}"
-                    if re.fullmatch(r"[a-f0-9]{32}", token):
-                        ipa_url += f"&attempt={token}"
-                    body = plistlib.dumps({"items": [{"assets": [{"kind": "software-package", "sha256": info["sha256"],
-                        "url": ipa_url},
-                        {"kind": "display-image", "url": f"{base_url}/icon-57.png"},
-                        {"kind": "full-size-image", "url": f"{base_url}/icon-512.png"}],
-                        "metadata": {"bundle-identifier": info["bundle_id"],
-                                     "bundle-version": info["version"], "kind": "software",
-                                     "platform-identifier": "com.apple.platform.iphoneos",
-                                     "title": info["title"]}}]})
+                    body = ota_manifest(base_url, project, info, token, icon.is_file())
                     content_type = "application/xml"
                 else:
                     token = new_attempt(project, info)
                     install = install_links(base_url, project, info, token)["install_url"]
                     page = (root / "install.html").read_text()
+                    icon_url = f"icon.png?v={info['sha256'][:16]}" if icon.is_file() else ""
                     body = (page.replace("@TITLE@", html.escape(info["title"], quote=True))
                             .replace("@VERSION@", html.escape(info["version"], quote=True))
                             .replace("@INSTALL_URL@", html.escape(install, quote=True))
+                            .replace("@ICON@", html.escape(icon_url, quote=True))
                             .replace("@ATTEMPT@", token)).encode()
                     content_type = "text/html; charset=utf-8"
                 self.reply(200, body, content_type, head_only)
                 return
+            self.send_ipa(ipa, project, info, token, head_only)
+
+        def send_ipa(self, ipa, project, info, token, head_only):
             with ipa.open("rb") as content:
                 size = os.fstat(content.fileno()).st_size
                 self.send_response(200)
@@ -778,6 +1449,25 @@ def ota_service(root):
                         return
                     update_attempt(token, project, info["sha256"], stage="transferred", sent=sent)
 
+        def save_report(self, project, kind):
+            """Store a log, screenshot, or crash diagnostic posted by an installed app."""
+            extension = {"log": "log", "crash": "json", "screenshot": "png"}.get(kind)
+            length = int(self.headers.get("Content-Length", "0"))
+            if not extension or not (root / "projects" / project).is_dir():
+                self.reply(404, b'{"error":"unknown project or report kind"}\n')
+                return
+            if not 0 < length <= 16 * 1024 * 1024:
+                self.reply(413, b'{"error":"reports must be 1 byte to 16 MB"}\n')
+                return
+            directory = root / "reports" / project
+            directory.mkdir(parents=True, exist_ok=True)
+            stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+            temporary = directory / f".{uuid.uuid4().hex}"
+            temporary.write_bytes(self.rfile.read(length))
+            os.replace(temporary, directory / f"{stamp}-{kind}.{extension}")
+            prune_reports(root)
+            self.reply(200, b'{"ok":true}\n')
+
         def do_GET(self):
             self.send_content()
 
@@ -785,25 +1475,45 @@ def ota_service(root):
             self.send_content(head_only=True)
 
         def do_POST(self):
-            pieces = urllib.parse.urlsplit(self.path).path.strip("/").split("/")
+            parsed = urllib.parse.urlsplit(self.path)
+            pieces = parsed.path.strip("/").split("/")
             if pieces[:1] == ["gala"]:
                 pieces = pieces[1:]
+            if pieces == ["apns", "subscribe"]:
+                if not apns_ready(root):
+                    self.reply(503, b'{"error":"Native push is not configured"}\n')
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < length <= 4096:
+                        fail("Invalid APNs registration size")
+                    request = json.loads(self.rfile.read(length))
+                    if not isinstance(request, dict):
+                        fail("Invalid APNs registration")
+                    register_apns(root, request)
+                    self.reply(200, b'{"ok":true}\n')
+                except (KeyError, ValueError, TypeError, RuntimeError) as error:
+                    self.reply(400, json.dumps({"error": str(error)}).encode())
+                return
             if len(pieces) == 2 and SAFE_NAME.fullmatch(pieces[0]) and pieces[1] == "attempt":
                 project = pieces[0]
                 ipa = root / "ota" / project / "current.ipa"
-                info_file = ipa.parent / "current.json"
-                if not ipa.is_file() or not info_file.is_file() or ipa.stat().st_mtime < time.time() - OTA_TTL_SECONDS:
+                info = current_delivery(ipa.parent)
+                if info is None:
                     self.send_error(404)
                     return
                 try:
-                    info = json.loads(info_file.read_text())
                     base_url = tailnet_base_url()
                 except (subprocess.CalledProcessError, KeyError, ValueError, OSError):
                     self.send_error(503, "Gala install is unavailable")
                     return
-                token = new_attempt(project, info)
+                requested = urllib.parse.parse_qs(parsed.query).get("attempt", [""])[0]
+                token = new_attempt(project, info, requested)
                 body = json.dumps(install_links(base_url, project, info, token)).encode()
                 self.reply(200, body)
+                return
+            if len(pieces) == 2 and SAFE_NAME.fullmatch(pieces[0]) and pieces[1] == "report":
+                self.save_report(pieces[0], urllib.parse.parse_qs(parsed.query).get("kind", [""])[0])
                 return
             if pieces != ["subscribe"]:
                 self.send_error(404)
@@ -842,16 +1552,14 @@ def mac_service(root):
     with tempfile.NamedTemporaryFile(dir=root) as probe:
         probe.write(b"ok")
         probe.flush()
-    config = root / "rsyncd.conf"
-    config.write_text(f"[gala]\npath = {root}\nread only = no\nuse chroot = no\nlist = no\nhosts allow = 127.0.0.1\n")
-    daemon = subprocess.Popen(["/usr/bin/rsync", "--daemon", "--no-detach",
-                               "--address=127.0.0.1", f"--port={RSYNC_PORT}",
-                               f"--config={config}"], stdout=subprocess.DEVNULL,
-                              stderr=subprocess.STDOUT)
-    expire_ota(root)
-    threading.Thread(target=expiration_loop, args=(root,), daemon=True).start()
-    threading.Thread(target=ota_service, args=(root,), daemon=True).start()
-
+    # Python opens its own log after its volume access check. launchd cannot open
+    # this USB log before starting the process, even when Python has access.
+    log_fd = os.open(root / "service.log", os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        os.dup2(log_fd, 1)
+        os.dup2(log_fd, 2)
+    finally:
+        os.close(log_fd)
     class Handler(BaseHTTPRequestHandler):
         def respond(self, status, data):
             body = (json.dumps(data) + "\n").encode()
@@ -861,8 +1569,38 @@ def mac_service(root):
             self.end_headers()
             self.wfile.write(body)
 
+        def job_status(self, job, query):
+            """Long-poll until the job has new output or changes state, then return both."""
+            offset = int(query.get("offset", ["0"])[0])
+            begun = time.monotonic()
+            deadline = begun + min(float(query.get("wait", ["0"])[0]), 20)
+            state = queue.status(job)
+            if not state:
+                return None
+            log = root / "projects" / state["project"] / "runs" / job / "output.log"
+            while time.monotonic() < deadline:
+                size = log.stat().st_size if log.is_file() else 0
+                # Hold new output briefly so a chatty build doesn't cost one SSH call per line.
+                if (size > offset and time.monotonic() - begun >= 1) or state["state"] == "done":
+                    break
+                time.sleep(0.25)
+                previous, state = state, queue.status(job)
+                if (state["state"], state["ahead"]) != (previous["state"], previous["ahead"]):
+                    break
+            chunk = b""
+            if log.is_file():
+                with open(log, "rb") as content:
+                    content.seek(offset)
+                    chunk = content.read(256 * 1024)
+                # Send whole lines while the job is still writing.
+                if state["state"] != "done" and b"\n" in chunk:
+                    chunk = chunk[:chunk.rindex(b"\n") + 1]
+            return {**state, "log": chunk.decode(errors="replace"), "offset": offset + len(chunk)}
+
         def handle_request(self, method):
-            pieces = self.path.strip("/").split("/")
+            parsed = urllib.parse.urlsplit(self.path)
+            pieces = parsed.path.strip("/").split("/")
+            query = urllib.parse.parse_qs(parsed.query)
             try:
                 if method == "GET" and pieces == ["health"]:
                     if daemon.poll() is not None:
@@ -873,16 +1611,39 @@ def mac_service(root):
                     self.respond(200, {"root": str(root), "rsync": "ready"})
                 elif method == "POST" and len(pieces) == 2 and pieces[0] == "prepare" and SAFE_NAME.fullmatch(pieces[1]):
                     worker_prepare(root / "projects" / pieces[1])
+                    (root / "reports" / pieces[1]).mkdir(parents=True, exist_ok=True)
                     self.respond(200, {"prepared": pieces[1]})
                 elif method == "POST" and len(pieces) == 2 and pieces[0] == "clean" and SAFE_NAME.fullmatch(pieces[1]):
                     clean_runs(root / "projects" / pieces[1] / "runs")
-                    ota = root / "ota" / pieces[1]
-                    (ota / "current.ipa").unlink(missing_ok=True)
-                    (ota / "current.json").unlink(missing_ok=True)
+                    if query.get("ota", ["1"])[0] == "1":
+                        ota = root / "ota" / pieces[1]
+                        (ota / "current.ipa").unlink(missing_ok=True)
+                        (ota / "current.json").unlink(missing_ok=True)
+                        (ota / "icon.png").unlink(missing_ok=True)
                     self.respond(200, {"cleaned": pieces[1]})
+                elif method == "POST" and len(pieces) == 3 and pieces[0] == "jobs" and SAFE_NAME.fullmatch(pieces[1]):
+                    length = int(self.headers.get("Content-Length", "0"))
+                    request = json.loads(self.rfile.read(length)) if 0 < length <= 65536 else {}
+                    fingerprint = request.get("fingerprint")
+                    if fingerprint is not None and not re.fullmatch(r"[a-f0-9]{64}", str(fingerprint)):
+                        fail("Invalid source fingerprint")
+                    self.respond(200, queue.submit(pieces[1], pieces[2], request.get("steps", []),
+                                                   request.get("command"), bool(request.get("retest")),
+                                                   fingerprint))
+                elif method == "GET" and len(pieces) == 2 and pieces[0] == "jobs":
+                    state = self.job_status(pieces[1], query)
+                    self.respond(200 if state else 404, state or {"error": "unknown job; the Mac service may have restarted"})
+                elif method == "POST" and len(pieces) == 3 and pieces[0] == "jobs" and pieces[2] == "cancel":
+                    self.respond(200, {"cancelled": queue.cancel(pieces[1])})
+                elif method == "GET" and pieces == ["queue"]:
+                    self.respond(200, {"jobs": queue.snapshot()})
+                elif method == "POST" and len(pieces) == 2 and pieces[0] == "reports-clear" and SAFE_NAME.fullmatch(pieces[1]):
+                    shutil.rmtree(root / "reports" / pieces[1], ignore_errors=True)
+                    self.respond(200, {"cleared": pieces[1]})
                 elif method == "POST" and len(pieces) == 3 and pieces[0] in ("build", "test") and SAFE_NAME.fullmatch(pieces[1]):
-                    code = worker_job(root / "projects" / pieces[1], pieces[2], pieces[0])
-                    self.respond(200, {"exit_code": code})
+                    # Clients from before the queue API hold this request open for the whole job.
+                    queue.submit(pieces[1], pieces[2], [pieces[0]], retest=True)
+                    self.respond(200, {"exit_code": queue.wait(pieces[2])})
                 elif method == "POST" and len(pieces) == 3 and pieces[0] == "publish" and SAFE_NAME.fullmatch(pieces[1]):
                     self.respond(200, worker_publish(root, pieces[1], pieces[2]))
                 else:
@@ -896,40 +1657,80 @@ def mac_service(root):
         def do_POST(self):
             self.handle_request("POST")
 
+    # Bind first: a second copy of the service must fail here, before it touches
+    # scratch directories that the running copy's jobs are using.
+    server = ThreadingHTTPServer(("127.0.0.1", API_PORT), Handler)
+    config = root / "rsyncd.conf"
+    config.write_text(f"[gala]\npath = {root}\nread only = no\nuse chroot = no\nlist = no\nhosts allow = 127.0.0.1\n")
+    daemon = subprocess.Popen(["/usr/bin/rsync", "--daemon", "--no-detach",
+                               "--address=127.0.0.1", f"--port={RSYNC_PORT}",
+                               f"--config={config}"], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.STDOUT)
+    for scratch in ("signing", "tmp"):
+        shutil.rmtree(root / scratch, ignore_errors=True)
+    reset_cache_for_toolchain(root)
+    queue = JobQueue(root)
+    housekeeping(root, queue)
+    threading.Thread(target=expiration_loop, args=(root, queue), daemon=True).start()
+    threading.Thread(target=ota_service, args=(root,), daemon=True).start()
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     try:
-        ThreadingHTTPServer(("127.0.0.1", API_PORT), Handler).serve_forever()
+        server.serve_forever()
     finally:
+        with queue.lock:
+            running = queue.jobs.get(queue.current) if queue.current else None
+            if running and running["process"]:
+                stop_process_group(running["process"])
         daemon.terminate()
+
+
+def add_remote_options(cmd):
+    cmd.add_argument("--host", default=os.environ.get("GALA_HOST", "macbook"))
+    cmd.add_argument("--root", default=os.environ.get("GALA_REMOTE_ROOT", DEFAULT_ROOT))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
-    for action in ("doctor", "sync", "test", "build", "run", "deliver"):
+    for action in ("doctor", "sync", "test", "build", "run", "deliver", "exec"):
         cmd = sub.add_parser(action)
-        cmd.add_argument("--host", default=os.environ.get("GALA_HOST", "macbook"))
-        cmd.add_argument("--root", default=os.environ.get("GALA_REMOTE_ROOT", DEFAULT_ROOT))
+        add_remote_options(cmd)
         if action != "doctor":
             cmd.add_argument("--name", help="stable name for this Mac-side project mirror")
             cmd.add_argument("--checksum", action="store_true", help="compare file contents during sync")
             cmd.add_argument("--dry-run", action="store_true", help="show sync changes without building")
+            cmd.add_argument("--json", action="store_true",
+                             help="print only a final JSON summary on stdout; progress goes to stderr")
         if action == "run":
             cmd.add_argument("--udid", help="select a device when more than one is connected")
             cmd.add_argument("--p12", help="Apple development certificate and private key")
             cmd.add_argument("--profile", help="matching .mobileprovision file")
         if action in ("build", "run"):
             cmd.add_argument("--gate", action="store_true", help="require ios-test.sh to pass before building")
+        if action in ("build", "run", "deliver"):
+            cmd.add_argument("--retest", action="store_true",
+                             help="run ios-test.sh even if it passed on this exact source")
         if action == "build":
             cmd.add_argument("--deliver", action="store_true", help="test, build, sign on Mac, and publish for OTA install")
-    publish = sub.add_parser("publish", help="sign an IPA on the Mac and serve it privately for OTA install")
+        if action == "exec":
+            cmd.add_argument("--no-sync", action="store_true", help="run on the existing Mac mirror without syncing")
+            cmd.add_argument("command", nargs=argparse.REMAINDER,
+                             help="shell command to run in the Mac mirror; write files to $GALA_ARTIFACT_DIR")
+    publish = sub.add_parser("publish", aliases=["push"],
+                             help="sign and deliver an existing IPA; no build recipe required")
     publish.add_argument("ipa", nargs="?", help="IPA path; defaults to latest Gala Engine build")
-    publish.add_argument("--host", default=os.environ.get("GALA_HOST", "macbook"))
-    publish.add_argument("--root", default=os.environ.get("GALA_REMOTE_ROOT", DEFAULT_ROOT))
-    publish.add_argument("--name")
+    add_remote_options(publish)
+    publish.add_argument("--name", help="stable delivery name, also usable across clients")
+    publish.add_argument("--json", action="store_true")
+    queue = sub.add_parser("queue", help="show jobs running or waiting on the Mac")
+    add_remote_options(queue)
+    reports = sub.add_parser("reports", help="fetch logs, screenshots, and crashes sent by the installed app")
+    add_remote_options(reports)
+    reports.add_argument("--name")
+    reports.add_argument("--clear", action="store_true", help="delete the Mac's copies after fetching")
     watch = sub.add_parser("watch", help="rerun a Gala action after source edits")
     watch.add_argument("--action", dest="mode", choices=("test", "build", "run", "deliver"), default="run")
-    watch.add_argument("--host", default=os.environ.get("GALA_HOST", "macbook"))
-    watch.add_argument("--root", default=os.environ.get("GALA_REMOTE_ROOT", DEFAULT_ROOT))
+    add_remote_options(watch)
     watch.add_argument("--name")
     watch.add_argument("--checksum", action="store_true")
     watch.add_argument("--gate", action="store_true")
@@ -945,133 +1746,301 @@ def main():
     deploy.add_argument("--udid", help="select a device when more than one is connected")
     deploy.add_argument("--p12", help="Apple development certificate and private key")
     deploy.add_argument("--profile", help="matching .mobileprovision file")
-    for action in ("worker-prepare", "worker-build", "worker-test"):
-        cmd = sub.add_parser(action, help=argparse.SUPPRESS)
-        cmd.add_argument("project")
-        if action != "worker-prepare":
-            cmd.add_argument("job")
     options = parser.parse_args(['run'] if len(sys.argv) == 1 else None)
+    # A killed client (agent timeout, closed terminal) cancels its Mac job like Ctrl-C does.
+    for number in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(number, interrupt)
+    json_out = None
+    if getattr(options, "json", False):
+        # Recipe output and rsync/curl children inherit stdout, so point it at stderr.
+        sys.stdout.flush()
+        json_out = os.fdopen(os.dup(1), "w")
+        os.dup2(2, 1)
+    summary = {"action": options.action, "ok": False, "timings": {}}
+    started = time.monotonic()
+    code = 1
     try:
         if options.action == "doctor":
             client_doctor(options)
-        elif options.action == "worker-prepare":
-            worker_prepare(options.project)
-        elif options.action == "worker-build":
-            return worker_build(options.project, options.job)
-        elif options.action == "worker-test":
-            return worker_test(options.project, options.job)
         elif options.action == "mac-service":
             mac_service(options.root)
         elif options.action == "device":
             device_action(options)
         elif options.action == "deploy":
             client_deploy(options)
-        elif options.action == "publish":
-            client_publish(options)
+        elif options.action == "queue":
+            client_queue(options)
+        elif options.action == "reports":
+            client_reports(options)
+        elif options.action in ("publish", "push"):
+            client_publish(options, summary)
         elif options.action == "watch":
             validate_options(options)
             if options.interval <= 0 or options.debounce <= 0:
                 fail("Watch interval and debounce must be positive")
             client_watch(options)
         else:
-            validate_options(options)
-            source, _, remote_project = project_paths(options)
-            lock_dir = source / ".gala"
-            lock_dir.mkdir(exist_ok=True)
-            with open(lock_dir / "client.lock", "w") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
-                prepare(options, remote_project)
-                if options.action in ("test", "build", "run", "deliver") and not options.dry_run:
-                    service_request(options.host, "POST", f"clean/{remote_project.rsplit('/', 1)[-1]}")
-                    clean_runs(source / ".gala" / "runs")
-                sync(options, source, remote_project)
-                if options.action in ("test", "build", "run", "deliver") and not options.dry_run:
-                    if options.action in ("test", "deliver") or getattr(options, "gate", False) or getattr(options, "deliver", False):
-                        client_job_after_sync(options, source, remote_project, "test")
-                    if options.action in ("build", "run", "deliver"):
-                        build_job = client_job_after_sync(options, source, remote_project, "build")
-                    if options.action == "run":
-                        options.ipa = None
-                        client_deploy(options)
-                    elif options.action == "deliver" or getattr(options, "deliver", False):
-                        client_publish_job(options, source, remote_project, build_job)
+            client_project_action(options, summary)
+        code = summary.get("exit_code", 0)
+        summary["ok"] = code == 0
     except KeyboardInterrupt:
-        print("Stopped watching")
-        return 130
-    except (RuntimeError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, zipfile.BadZipFile) as error:
+        print("Interrupted", file=sys.stderr)
+        summary["error"] = "interrupted"
+        code = 130
+    except (RuntimeError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError,
+            zipfile.BadZipFile, ValueError, KeyError) as error:
         print(f"gala: {error}", file=sys.stderr)
-        return 1
-    return 0
+        summary["error"] = str(error)
+    if options.action in ("sync", "test", "build", "run", "deliver", "exec", "publish", "push"):
+        summary["timings"]["total"] = round(time.monotonic() - started, 1)
+        report_summary(summary, json_out)
+    return code
 
 
-def client_job_after_sync(options, source, remote_project, kind):
-    job = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6]
-    print(f"Running {kind} on {options.host} (job {job})", flush=True)
-    result = service_request(options.host, "POST", f"{kind}/{remote_project.rsplit('/', 1)[-1]}/{job}", check=False)
+def interrupt(*_):
+    raise KeyboardInterrupt
+
+
+def report_summary(summary, json_out):
+    order = ("prepare", "sync", "upload", "queue", "test", "build", "exec", "fetch", "deploy", "publish")
+    timings = summary["timings"]
+    parts = [f"{key} {timings[key]}s" for key in order if key in timings]
+    parts += [f"{step} skipped (source unchanged)" for step in summary.get("skipped", [])]
+    verdict = "passed" if summary["ok"] else "failed"
+    print(f"Summary: {summary['action']} {verdict} in {timings['total']}s"
+          + (f" ({', '.join(parts)})" if parts else ""), flush=True)
+    if summary.get("source"):
+        path = Path(summary["source"]) / ".gala" / "last-result.json"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps(summary, indent=2) + "\n")
+    if json_out:
+        json_out.write(json.dumps(summary) + "\n")
+        json_out.flush()
+
+
+class phase:
+    """Record how long one client step takes in the run summary."""
+
+    def __init__(self, summary, name):
+        self.summary, self.name = summary, name
+
+    def __enter__(self):
+        self.started = time.monotonic()
+
+    def __exit__(self, *_):
+        self.summary["timings"][self.name] = round(time.monotonic() - self.started, 1)
+
+
+def client_project_action(options, summary):
+    validate_options(options)
+    source, name, remote_project = project_paths(options)
+    summary.update(project=name, source=str(source))
+    action = options.action
+    acting = action != "sync" and not options.dry_run
+    if action == "exec" and not options.command:
+        fail("Pass a command: gala exec -- <command>")
+    if action == "run":
+        # Check before a full build rather than failing at the very end.
+        require_deploy_tools()
+        select_device(options.udid)
+    steps = {"exec": ["exec"], "test": ["test"]}.get(action, [])
+    if action == "deliver" or getattr(options, "gate", False) or getattr(options, "deliver", False):
+        steps.append("test")
+    if action in ("build", "run", "deliver"):
+        steps.append("build")
+    lock_dir = source / ".gala"
+    lock_dir.mkdir(exist_ok=True)
+    with open(lock_dir / "client.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        with phase(summary, "prepare"):
+            prepare(options, remote_project)
+            if acting:
+                # Tests and exec keep the current delivery installable.
+                clear_ota = "0" if set(steps) <= {"test", "exec"} else "1"
+                service_request(options.host, "POST", f"clean/{name}?ota={clear_ota}", capture_output=True)
+                clean_runs(source / ".gala" / "runs")
+        if not getattr(options, "no_sync", False):
+            with phase(summary, "sync"):
+                sync(options, source, remote_project)
+        if not acting:
+            return
+        command = None
+        if action == "exec":
+            command = options.command[1:] if options.command[0] == "--" else options.command
+            command = command[0] if len(command) == 1 else shlex.join(command)
+        retest = action == "test" or getattr(options, "retest", False)
+        fingerprint = (hashlib.sha256(repr(source_snapshot(source)).encode()).hexdigest()
+                       if "test" in steps else None)
+        client_job(options, source, remote_project, steps, summary, command, retest, fingerprint)
+        if summary.get("exit_code"):
+            return
+        if action == "run":
+            options.ipa = None
+            with phase(summary, "deploy"):
+                client_deploy(options)
+        elif action == "deliver" or getattr(options, "deliver", False):
+            with phase(summary, "publish"):
+                client_publish_job(options, source, remote_project, summary["job"], summary)
+
+
+def service_json(host, method, path, data=None, attempts=1):
+    """Call the Mac service and parse its JSON reply, retrying brief network drops."""
+    extra = ["-H", "Content-Type: application/json", "--data-binary", "@-"] if data is not None else []
+    for attempt in range(attempts):
+        result = remote(host, "curl", "--fail-with-body", "-sS", "-X", method, *extra,
+                        f"http://127.0.0.1:{API_PORT}/{path}", check=False, capture_output=True, text=True,
+                        input=json.dumps(data) if data is not None else None)
+        try:
+            reply = json.loads(result.stdout)
+        except ValueError:
+            reply = {"error": result.stderr.strip() or result.stdout.strip() or "no reply"}
+        if result.returncode == 0:
+            return reply
+        # curl exits 22 when the service answered with an HTTP error; anything else is transport.
+        if result.returncode == 22:
+            if "unknown request" in str(reply.get("error")):
+                fail("The Mac service is older than this client; update service.py and restart it")
+            fail(f"Mac service: {reply.get('error')}")
+        if attempt < attempts - 1:
+            time.sleep(2)
+    fail(f"Mac service unreachable: {reply.get('error')}")
+
+
+def new_job_id():
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6]
+
+
+def client_job(options, source, remote_project, steps, summary, command=None, retest=False, fingerprint=None):
+    """Queue a job on the Mac, stream its output, and fetch its run directory."""
+    name = remote_project.rsplit("/", 1)[-1]
+    job = new_job_id()
+    summary["job"] = job
+    state = service_json(options.host, "POST", f"jobs/{name}/{job}",
+                         {"steps": steps, "command": command, "retest": retest, "fingerprint": fingerprint})
+    print(f"Queued {'+'.join(steps)} on {options.host} (job {job})", flush=True)
+    offset, ahead = 0, None
+    try:
+        while True:
+            if state["state"] == "queued" and state["ahead"] and state["ahead"] != ahead:
+                ahead = state["ahead"]
+                print(f"Queue position {ahead + 1}: waiting for {state.get('blocked_by', 'earlier jobs')}"
+                      + (f" and {ahead - 1} more" if ahead > 1 else ""), flush=True)
+            elif state["state"] != "queued" and ahead:
+                print(f"Started after {state['waited']}s in queue", flush=True)
+                ahead = 0
+            sys.stdout.write(state.get("log", ""))
+            sys.stdout.flush()
+            offset = state.get("offset", offset)
+            if state["state"] == "done":
+                break
+            state = service_json(options.host, "GET", f"jobs/{job}?offset={offset}&wait=15", attempts=5)
+    except KeyboardInterrupt:
+        remote(options.host, "curl", "-sS", "-X", "POST", f"http://127.0.0.1:{API_PORT}/jobs/{job}/cancel",
+               check=False, capture_output=True)
+        raise
+    summary["timings"]["queue"] = state["waited"]
+    summary["timings"].update(state["timings"])
+    summary["skipped"] = state["skipped"]
     destination = source / ".gala" / "runs" / job
     destination.mkdir(parents=True, exist_ok=True)
-    try:
-        rsync_command(options, "-a", daemon_url(f"{remote_project}/runs/{job}/"), f"{destination}/")
-    except subprocess.CalledProcessError:
-        fail(f"Mac {kind} service failed before returning a result (HTTP exit {result.returncode})")
+    with phase(summary, "fetch"):
+        try:
+            rsync_command(options, "-a", daemon_url(f"{remote_project}/runs/{job}/"), f"{destination}/")
+        except subprocess.CalledProcessError:
+            fail(f"Mac job {job} ended without a result")
     manifest = json.loads((destination / "result.json").read_text())
-    print(f"{kind.title()} log: {destination / f'{kind}.log'}")
-    for artifact in manifest["artifacts"]:
-        print(f"IPA: {destination / artifact['path']}")
+    summary["run_dir"] = str(destination)
+    summary["logs"] = [str(destination / f"{step}.log") for step in steps if (destination / f"{step}.log").is_file()]
+    summary["artifacts"] = [{**artifact, "path": str(destination / artifact["path"])}
+                            for artifact in manifest["artifacts"]]
+    summary["exit_code"] = manifest["exit_code"]
+    for log in summary["logs"]:
+        print(f"Log: {log}")
+    for artifact in summary["artifacts"]:
+        print(f"IPA: {artifact['path']}")
         print(f"SHA-256: {artifact['sha256']}")
-    if result.returncode or manifest["exit_code"]:
-        fail(f"{kind.title()} failed; inspect {destination / f'{kind}.log'}")
+    if steps == ["exec"]:
+        files = [path for path in destination.rglob("*") if path.is_file()
+                 and path.name not in ("result.json", "output.log", "exec.log")]
+        summary["files"] = [str(path) for path in sorted(files)]
+        if files:
+            print(f"Files from $GALA_ARTIFACT_DIR: {destination}")
+        if manifest["exit_code"]:
+            print(f"Command exited with status {manifest['exit_code']}", file=sys.stderr)
+        return job
+    if manifest["exit_code"]:
+        failed = next(reversed(manifest["timings"]), None) or next(
+            (step for step in steps if step not in manifest["skipped"]), steps[-1])
+        fail(f"{failed.title()} failed; inspect {destination / f'{failed}.log'}")
     return job
 
 
-def client_publish_job(options, source, remote_project, job):
+def client_publish_job(options, source, remote_project, job, summary):
     name = remote_project.rsplit("/", 1)[-1]
-    response = service_request(options.host, "POST", f"publish/{name}/{job}",
-                               check=False, capture_output=True, text=True)
-    if response.returncode:
-        fail(f"Mac signing or publish failed: {response.stdout.strip() or response.stderr.strip()}")
-    details = json.loads(response.stdout)
-    status = remote(options.host, "/opt/homebrew/bin/tailscale", "status", "--json",
-                    capture_output=True, text=True)
-    hostname = json.loads(status.stdout)["Self"]["DNSName"].rstrip(".")
-    base = f"https://{hostname}/gala/{name}"
-    install = base + "/"
-    ipa_url = base + "/current.ipa?sha256=" + details["sha256"]
-    checked(["curl", "-fsSI", install], capture_output=True)
-    checked(["curl", "-fsSI", ipa_url], capture_output=True)
+    details = service_json(options.host, "POST", f"publish/{name}/{job}")
+    if "install_url" not in details:
+        fail("Mac published the build but could not read its Tailscale name; check tailscale status on the Mac")
+    install, ipa_url = details["install_url"], details["ipa_url"]
+    for url in (install, ipa_url):
+        if remote(options.host, "curl", "-fsSI", url, check=False, capture_output=True).returncode:
+            fail(f"Published, but {url} does not answer over HTTPS; check tailscale serve on the Mac")
     result = {"ipa": ipa_url, "install": install, **details}
     path = source / ".gala" / "current-publish.json"
     path.parent.mkdir(exist_ok=True)
     path.write_text(json.dumps(result, indent=2) + "\n")
-    print(f"Install on iPhone or iPad: {install}")
-    print(f"Signed IPA: {ipa_url}")
-    print(f"SHA-256: {details['sha256']}")
-    print(f"Registered devices in profile: {details['profile_devices']}")
-    notifications = details.get("notifications", {})
-    registered = notifications.get("registered", 0)
-    sent = notifications.get("sent", 0)
-    print(f"Build notifications: {sent} sent to {registered} subscribed devices")
-    if registered < 2:
-        print("Subscribe the iPhone and iPad from the Gala Home Screen page to notify both")
-    elif sent < registered:
-        print("Some build notifications failed; inspect the Mac's push-status.json")
-    if not {1, 2}.issubset(set(details.get("families", []))):
-        print("Note: this app does not declare support for both iPhone and iPad")
+    summary.update(install_url=install, ipa_url=ipa_url, title=details["title"],
+                   version=details["version"], sha256=details["sha256"])
+    print(f"Delivered {details['title']} build {details['version']}: {install}")
 
 
-def client_publish(options):
+def client_publish(options, summary):
+    validate_options(options)
+    source, name, remote_project = project_paths(options, require_recipe=not bool(options.ipa))
+    summary.update(project=name, source=str(source))
+    lock_dir = source / ".gala"
+    lock_dir.mkdir(exist_ok=True)
+    with open(lock_dir / "client.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        ipa = Path(options.ipa).expanduser().resolve() if options.ipa else latest_ipa()
+        if not ipa.is_file() or ipa.suffix.lower() != ".ipa":
+            fail(f"IPA not found: {ipa}")
+        with zipfile.ZipFile(ipa) as archive:
+            if archive.testzip() or not any(name.startswith("Payload/") and ".app/" in name for name in archive.namelist()):
+                fail(f"Invalid IPA: {ipa}")
+        with phase(summary, "prepare"):
+            prepare(options, remote_project)
+        incoming = f"{remote_project}/incoming/"
+        with phase(summary, "upload"):
+            rsync_command(options, "-a", str(ipa), daemon_url(incoming + "current.ipa"))
+        with phase(summary, "publish"):
+            client_publish_job(options, source, remote_project, "incoming", summary)
+
+
+def client_queue(options):
+    validate_options(options)
+    jobs = service_json(options.host, "GET", "queue")["jobs"]
+    if not jobs:
+        print("The Mac is idle")
+    for item in jobs:
+        timing = (f"running {item['running_for']}s" if item["state"] == "running"
+                  else f"waiting {item['waited']}s, {item['ahead']} ahead")
+        print(f"{item['job']}  {item['project']}  {'+'.join(item['steps'])}  {timing}")
+
+
+def client_reports(options):
     validate_options(options)
     source, name, remote_project = project_paths(options)
-    ipa = Path(options.ipa).expanduser().resolve() if options.ipa else latest_ipa()
-    if not ipa.is_file() or ipa.suffix.lower() != ".ipa":
-        fail(f"IPA not found: {ipa}")
-    with zipfile.ZipFile(ipa) as archive:
-        if archive.testzip() or not any(name.startswith("Payload/") and ".app/" in name for name in archive.namelist()):
-            fail(f"Invalid IPA: {ipa}")
     prepare(options, remote_project)
-    incoming = f"{remote_project}/incoming/"
-    rsync_command(options, "-a", str(ipa), daemon_url(incoming + "current.ipa"))
-    client_publish_job(options, source, remote_project, "incoming")
+    destination = source / ".gala" / "reports"
+    destination.mkdir(parents=True, exist_ok=True)
+    rsync_command(options, "-a", daemon_url(f"reports/{name}/"), f"{destination}/")
+    if options.clear:
+        service_json(options.host, "POST", f"reports-clear/{name}")
+    reports = sorted((path for path in destination.iterdir() if path.is_file()), reverse=True)
+    if not reports:
+        print("No reports yet. Add GalaReporter.swift to the app and deliver it with gala deliver.")
+    for path in reports:
+        print(f"{path}  {path.stat().st_size} bytes")
 
 
 if __name__ == "__main__":

@@ -3,225 +3,415 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <meta name="theme-color" content="#f6f5ef">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#000000">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Gala">
   <link rel="manifest" href="/gala/manifest.webmanifest">
   <link rel="icon" href="/gala/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/gala/icon-512.png">
-  <title>Gala · Your builds</title>
+  <title>Gala</title>
   <style>
-    :root{font:16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#213629;background:#f6f5ef;-webkit-font-smoothing:antialiased}
-    *{box-sizing:border-box} body{margin:0;min-height:100vh} button,a{-webkit-tap-highlight-color:transparent} button{font:inherit}
-    .shell{width:min(100%,560px);margin:auto;padding:max(24px,env(safe-area-inset-top)) 20px max(36px,env(safe-area-inset-bottom))}
-    .topbar{display:flex;align-items:center;justify-content:space-between;margin:0 0 28px}
-    .brand{display:flex;align-items:center;gap:11px;font-weight:790;font-size:22px;letter-spacing:-.045em}
-    .brand img{width:37px;height:37px;border-radius:11px;box-shadow:0 3px 9px #14372922}
-    .brand span{color:#e2795e}
-    .private{display:inline-flex;align-items:center;gap:7px;border:1px solid #dce8db;padding:7px 10px;border-radius:999px;background:#ffffffb8;color:#496253;font-size:11px;font-weight:800;letter-spacing:.065em}
-    .private::before{content:"";width:7px;height:7px;border-radius:50%;background:#77b98b;box-shadow:0 0 0 3px #77b98b27}
-    .hero{position:relative;overflow:hidden;isolation:isolate;min-height:248px;padding:27px;border-radius:30px;background:#214e39;color:#fff;box-shadow:0 18px 36px #214e391e}
-    .hero::before{content:"";position:absolute;z-index:-1;width:260px;height:260px;right:-57px;top:9px;border:42px solid #ffffff13;border-radius:48% 52% 54% 46%;transform:rotate(-31deg)}
-    .hero::after{content:"";position:absolute;z-index:-1;width:130px;height:130px;right:-26px;top:65px;border-radius:50%;background:#a6d79620;filter:blur(5px)}
-    .eyebrow{margin:0 0 18px;color:#c9e9cb;font-size:11px;font-weight:800;letter-spacing:.13em;text-transform:uppercase}
-    h1{max-width:330px;margin:0;font-size:clamp(34px,8vw,44px);line-height:1.05;letter-spacing:-.06em;font-weight:790}
-    .hero p:last-child{max-width:290px;margin:16px 0 0;color:#d8eadb;font-size:14px;line-height:1.5}
-    .section-heading{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin:31px 2px 14px}
-    h2{margin:0;font-size:21px;letter-spacing:-.035em;line-height:1.2}
-    .section-heading small{color:#718277;font-size:12px;font-weight:650}
-    .card{border:1px solid #e5eae1;border-radius:24px;background:#fff;box-shadow:0 8px 25px #233e2e08}
-    .notifications{padding:20px}
-    .notification-top{display:flex;align-items:flex-start;gap:13px}
-    .notification-icon{display:grid;place-items:center;width:44px;height:44px;flex:none;border-radius:14px;background:#fdefe8;color:#dc765e}
-    .notification-copy{min-width:0;flex:1}
-    .notification-copy h3{margin:0 0 3px;font-size:16px;letter-spacing:-.025em}
-    .notification-copy p{margin:0;color:#6d7e72;font-size:13px;line-height:1.5}
-    .state{display:inline-flex;align-items:center;flex:none;margin-top:2px;padding:5px 8px;border-radius:8px;background:#f2f4ef;color:#6b7b70;font-size:11px;font-weight:800}
-    .state.on{background:#e9f5e9;color:#2e7950}.state.error{background:#fff1e9;color:#a55237}
-    .primary{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;min-height:49px;margin-top:19px;padding:12px 16px;border:0;border-radius:14px;background:#e87960;color:#fff;font-weight:760;cursor:pointer;box-shadow:0 5px 12px #e8796033}
-    .primary:hover{background:#d96b53}.primary:active{transform:scale(.985)}.primary:disabled{cursor:default;opacity:.65;box-shadow:none;transform:none}
-    #status{margin:10px 2px 0;color:#687b6e;font-size:12px;line-height:1.45}#status:empty{display:none}
-    .guide{margin-top:17px;padding:15px;border-radius:15px;background:#f6f8f3;color:#425a48;font-size:13px}
-    .guide strong{display:block;margin-bottom:5px;color:#243d2b}.guide p{margin:0;line-height:1.5}.guide svg{vertical-align:-3px}
-    #projects{display:grid;gap:10px}
-    .app{display:flex;align-items:center;gap:14px;min-height:83px;padding:15px;color:inherit;text-decoration:none;transition:transform .15s,box-shadow .15s}
-    .app:hover{transform:translateY(-2px);box-shadow:0 12px 28px #233e2e12}.app:active{transform:scale(.99)}
-    .app-icon{display:grid;place-items:center;width:50px;height:50px;flex:none;border-radius:15px;background:#e6efde;color:#356943;font-size:23px;font-weight:780}
-    .app-copy{flex:1;min-width:0}.app-name{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:15px;font-weight:760}
-    .app-detail{display:block;margin-top:2px;color:#748276;font-size:12px}
-    .arrow{display:grid;place-items:center;width:30px;height:30px;flex:none;border-radius:50%;background:#f1f4ed;color:#4b7454;font-size:21px;line-height:1}
-    .empty{display:flex;gap:14px;align-items:center;padding:20px;color:#5e7563}
-    .empty-symbol{display:grid;place-items:center;width:44px;height:44px;flex:none;border-radius:14px;background:#eaf2e7;font-size:21px}
-    .empty strong{display:block;color:#2b4832;font-size:14px}.empty p{margin:3px 0 0;font-size:12px;line-height:1.5}
-    code{padding:2px 5px;border-radius:5px;background:#edf2e9;color:#355e3c;font-size:.95em}
-    .footer{margin-top:28px;text-align:center;color:#8b998d;font-size:11px;font-weight:680;letter-spacing:.04em}.footer b{color:#df8069}
-    :focus-visible{outline:3px solid #e87960;outline-offset:3px}[hidden]{display:none!important}
-    @media(max-width:390px){.shell{padding-left:16px;padding-right:16px}.hero{min-height:225px;padding:24px}.state{font-size:10px}}
-    @media(prefers-color-scheme:dark){
-      :root{color:#e7f0e6;background:#14251b}.private{background:#22392a;border-color:#36513a;color:#b8cfba}
-      .card{background:#203429;border-color:#344c39;box-shadow:none}.notification-copy p,#status,.app-detail,.empty{color:#acc0ae}
-      .state{background:#334639;color:#c0d0c2}.state.on{background:#28533a;color:#b1e4b9}.state.error{background:#653e33;color:#ffc7b3}
-      .guide{background:#2a4130;color:#c7d9c8}.guide strong,.empty strong{color:#ecf4e9}
-      .app-icon,.empty-symbol{background:#355541;color:#c6e8c4}.arrow,code{background:#314a37;color:#c2e6c2}.footer{color:#8faa93}
+    :root{
+      --bg:#000;--card:#1c1c1e;--card-hover:#232325;--fill:rgba(118,118,128,.24);
+      --label:#fff;--secondary:rgba(235,235,245,.6);--tertiary:rgba(235,235,245,.3);
+      --accent:#ff7b5c;--accent-soft:rgba(255,123,92,.17);--accent-fill:#e4583a;--red:#ff453a;
+      --top:env(safe-area-inset-top);--gutter:max(20px,env(safe-area-inset-left));
+      --glass:rgba(40,40,44,.5);--rim:inset 0 .5px 0 rgba(255,255,255,.22),inset 0 0 0 .5px rgba(255,255,255,.08);
+      color-scheme:dark;font:17px/1.35 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;
+      color:var(--label);background:var(--bg);-webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%
     }
-    @media(prefers-reduced-motion:reduce){.app{transition:none}}
+    *{box-sizing:border-box}
+    body{margin:0;min-height:100vh;min-height:100dvh}
+    body::before{content:"";position:fixed;inset:0 0 auto;height:520px;z-index:-1;pointer-events:none;
+      background:radial-gradient(60% 70% at 88% -10%,rgba(255,123,92,.2),transparent 70%),
+                 radial-gradient(55% 65% at 5% -15%,rgba(46,125,82,.26),transparent 70%)}
+    button{font:inherit;color:inherit;border:0;background:none;padding:0;cursor:pointer;-webkit-tap-highlight-color:transparent}
+    :focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+    [hidden]{display:none!important}
+
+    /* Floating chrome: a soft scroll-edge blur, compact title, and one glass control. */
+    .edge{position:fixed;inset:0 0 auto;height:calc(var(--top) + 60px);z-index:5;pointer-events:none;opacity:0;
+      background:linear-gradient(#000c,#0000);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);
+      -webkit-mask-image:linear-gradient(#000 55%,#0000);mask-image:linear-gradient(#000 55%,#0000);transition:opacity .2s}
+    .compact{position:fixed;left:0;right:0;top:calc(var(--top) + 12px);z-index:6;text-align:center;font-weight:600;
+      pointer-events:none;opacity:0;transform:translateY(4px);transition:opacity .2s,transform .2s}
+    .scrolled .edge{opacity:1}.scrolled .compact{opacity:1;transform:none}
+    .glass-button{position:fixed;z-index:7;top:calc(var(--top) + 6px);right:max(var(--gutter),calc((100vw - 1080px)/2 + var(--gutter)));
+      display:grid;place-items:center;width:44px;height:44px;border-radius:50%;background:var(--glass);box-shadow:var(--rim),0 6px 18px rgba(0,0,0,.35);
+      -webkit-backdrop-filter:blur(20px) saturate(180%);backdrop-filter:blur(20px) saturate(180%);transition:transform .15s,background .15s}
+    .glass-button:active{transform:scale(.9)}
+    .glass-button svg{width:21px;height:21px}
+    .glass-button.on{color:var(--accent)}
+    .glass-button.pending::after{content:"";position:absolute;top:10px;right:11px;width:8px;height:8px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 2px #2a2a2e}
+
+    .page{max-width:1080px;margin:0 auto;padding:calc(var(--top) + 56px) var(--gutter) max(40px,env(safe-area-inset-bottom))}
+    h1{margin:0 0 18px;font-size:34px;line-height:41px;font-weight:700;letter-spacing:.01em}
+
+    .tip{display:flex;align-items:center;gap:12px;margin:0 0 16px;padding:12px 12px 12px 14px;border-radius:20px;background:var(--card);animation:rise .3s ease-out}
+    .tip-icon{display:grid;place-items:center;flex:none;width:36px;height:36px;border-radius:50%;background:var(--accent-soft);color:var(--accent)}
+    .tip-icon svg{width:19px;height:19px}
+    .tip-copy{flex:1;min-width:0}
+    .tip-copy strong{display:block;font-size:15px;font-weight:600}
+    .tip-copy p{margin:1px 0 0;color:var(--secondary);font-size:13px;line-height:1.35}
+    .tip-close{display:grid;place-items:center;flex:none;width:30px;height:30px;margin:-4px -2px -4px -4px;border-radius:50%;color:var(--tertiary)}
+    .tip-close svg{width:12px;height:12px}
+
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px}
+    .app{display:flex;align-items:center;gap:14px;min-width:0;padding:14px 16px 14px 14px;border-radius:24px;background:var(--card);animation:rise .3s ease-out both;transition:background .15s}
+    @media(hover:hover){.app:hover{background:var(--card-hover)}}
+    .icon{position:relative;display:grid;place-items:center;flex:none;width:60px;height:60px;border-radius:13.5px;overflow:hidden;
+      color:#fff;font:600 27px/1 ui-rounded,-apple-system,system-ui,sans-serif}
+    .icon::after{content:"";position:absolute;inset:0;border-radius:inherit;box-shadow:inset 0 0 0 .5px rgba(255,255,255,.14)}
+    .icon img{width:100%;height:100%;display:block}
+    .meta{flex:1;min-width:0}
+    .name{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-weight:600}
+    .detail{display:block;margin-top:2px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:var(--secondary);font-size:15px;font-variant-numeric:tabular-nums}
+    .detail.warn{color:var(--red)}
+
+    .pill{position:relative;display:grid;place-items:center;flex:none;min-width:78px;height:32px;padding:0 16px;border-radius:16px;
+      background:var(--accent-soft);color:var(--accent);font-size:15px;font-weight:700;letter-spacing:-.01em;transition:transform .12s,background .15s,opacity .15s}
+    .pill::before{content:"";position:absolute;inset:-6px -4px}
+    .pill:active{transform:scale(.93)}
+    .pill.quiet{background:var(--fill);color:var(--secondary)}
+    .pill.busy{min-width:32px;width:32px;padding:0;background:none;cursor:default;margin-left:23px;margin-right:23px}
+    .pill.busy:active{transform:none}
+    .pill svg{display:block;width:32px;height:32px;animation:pop .2s ease-out}
+    .ring{transform:rotate(-90deg)}
+    .ring circle{fill:none;stroke-width:3}
+    .ring .track{stroke:var(--fill)}
+    .ring .bar{stroke:var(--accent);stroke-linecap:round;transition:stroke-dashoffset .3s linear}
+    .spin{animation:spin .9s linear infinite}
+    @keyframes spin{to{transform:rotate(270deg)}}
+    @keyframes pop{from{transform:scale(.6);opacity:0}}
+    @keyframes rise{from{transform:translateY(6px);opacity:0}}
+
+    .notice{display:flex;flex-direction:column;align-items:center;max-width:340px;margin:12vh auto 0;text-align:center}
+    .notice svg{width:52px;height:52px;margin-bottom:14px;color:var(--tertiary)}
+    .notice h2{margin:0;font-size:22px;font-weight:700}
+    .notice p{margin:6px 0 0;color:var(--secondary);font-size:15px;line-height:1.45}
+    .notice code{font:14px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--label)}
+    .notice .pill{margin-top:20px}
+
+    .toast{position:fixed;left:50%;bottom:max(24px,calc(env(safe-area-inset-bottom) + 12px));z-index:9;max-width:calc(100vw - 40px);
+      padding:12px 20px;border-radius:24px;background:var(--glass);box-shadow:var(--rim),0 10px 30px rgba(0,0,0,.45);
+      -webkit-backdrop-filter:blur(24px) saturate(180%);backdrop-filter:blur(24px) saturate(180%);
+      font-size:15px;font-weight:600;text-align:center;opacity:0;transform:translate(-50%,12px) scale(.96);pointer-events:none;transition:opacity .2s,transform .25s}
+    .toast.show{opacity:1;transform:translate(-50%,0)}
+
+    @media(min-width:700px){:root{--gutter:max(32px,env(safe-area-inset-left))}.page{padding-top:calc(var(--top) + 64px)}}
+    @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
   </style>
 </head>
 <body>
-  <main class="shell">
-    <header class="topbar">
-      <div class="brand"><img src="/gala/icon.svg" alt="">Gala <span>Engine</span></div>
-      <div class="private">YOUR TAILNET</div>
-    </header>
-    <section class="hero" aria-labelledby="hero-title">
-      <p class="eyebrow">Fresh from your Mac</p>
-      <h1 id="hero-title">Good things<br>are building.</h1>
-      <p>One place for the latest iPhone and iPad builds, wherever you are.</p>
-    </section>
-    <section aria-labelledby="notifications-title">
-      <div class="section-heading"><h2 id="notifications-title">Stay in the loop</h2><small>01 / NOTIFICATIONS</small></div>
-      <div class="card notifications">
-        <div class="notification-top">
-          <span class="notification-icon" aria-hidden="true">
-            <svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9ZM10 21h4"/></svg>
-          </span>
-          <div class="notification-copy"><h3>Build alerts</h3><p>Get a tap-to-install alert when a new build is ready.</p></div>
-          <span class="state" id="notification-state">CHECKING</span>
-        </div>
-        <button class="primary" id="notify" type="button" disabled>Enable notifications <span aria-hidden="true">↗</span></button>
-        <p id="status" role="status" aria-live="polite"></p>
-        <div class="guide" id="home-screen-guide" hidden>
-          <strong>First, add Gala to your Home Screen</strong>
-          <p>In Safari, tap Share <svg width="15" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-label="Share"><path d="M8 10V1m0 0L5.5 3.5M8 1l2.5 2.5M3 7v7h10V7"/></svg> → Add to Home Screen. Open Gala from its icon, then turn on alerts here.</p>
-        </div>
-      </div>
-    </section>
-    <section aria-labelledby="projects-title">
-      <div class="section-heading"><h2 id="projects-title">Ready to install</h2><small id="build-count">02 / BUILDS</small></div>
-      <div id="projects"></div>
-      <div class="card empty" id="empty" hidden>
-        <span class="empty-symbol" aria-hidden="true">↗</span>
-        <div><strong>Nothing in the basket yet</strong><p>Run <code>gala deliver</code> in a project. Its latest build will appear here.</p></div>
-      </div>
-    </section>
-    <footer class="footer">GALA ENGINE <b>✦</b> FRESH LOOK</footer>
+  <div class="edge" aria-hidden="true"></div>
+  <div class="compact" aria-hidden="true">Builds</div>
+  <button class="glass-button" id="alerts" type="button" aria-label="Build alerts"></button>
+  <main class="page">
+    <h1 id="title">Builds</h1>
+    <div class="tip" id="tip" hidden>
+      <span class="tip-icon" aria-hidden="true"></span>
+      <div class="tip-copy"><strong id="tip-title"></strong><p id="tip-text"></p></div>
+      <button class="pill" id="tip-action" type="button" hidden>Turn On</button>
+      <button class="tip-close" id="tip-close" type="button" aria-label="Dismiss"></button>
+    </div>
+    <section class="grid" id="list" aria-label="Builds"></section>
+    <div class="notice" id="notice" hidden>
+      <span id="notice-icon" aria-hidden="true"></span>
+      <h2 id="notice-title"></h2>
+      <p id="notice-text"></p>
+      <button class="pill" id="notice-action" type="button" hidden>Try Again</button>
+    </div>
   </main>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script>
     const base = "/gala";
-    const status = document.getElementById("status");
-    const button = document.getElementById("notify");
-    const notificationState = document.getElementById("notification-state");
-    let registration;
-    let vapidKey;
-    function setState(label, kind = "") {
-      notificationState.textContent = label;
-      notificationState.className = "state" + (kind ? " " + kind : "");
+    const $ = id => document.getElementById(id);
+    const svg = {
+      bell: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8.5a6 6 0 0 0-12 0c0 6.5-2.5 8-2.5 8h17S18 15 18 8.5"/><path d="M10 20a2.2 2.2 0 0 0 4 0"/></svg>',
+      bellOn: '<svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8.5a6 6 0 0 0-12 0c0 6.5-2.5 8-2.5 8h17S18 15 18 8.5"/><path d="M10 20a2.2 2.2 0 0 0 4 0" fill="none"/></svg>',
+      bellOff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M8.7 3.7A6 6 0 0 1 18 8.5c0 3 .5 5 1.2 6.3M16.5 16.5h-13S6 15 6 8.5c0-.7.1-1.3.3-1.9"/><path d="M10 20a2.2 2.2 0 0 0 4 0M3 3l18 18"/></svg>',
+      close: '<svg viewBox="0 0 12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M2 2l8 8M10 2l-8 8"/></svg>',
+      check: '<svg viewBox="0 0 32 32" fill="none"><circle cx="16" cy="16" r="14.5" style="fill:var(--accent)"/><path d="M10 16.5l4 4 8-9" stroke="#1c1c1e" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+      spinner: '<svg class="ring spin" viewBox="0 0 32 32"><circle class="track" cx="16" cy="16" r="13"/><circle class="bar" cx="16" cy="16" r="13" pathLength="100" stroke-dasharray="22 100"/></svg>',
+      ring: '<svg class="ring" viewBox="0 0 32 32"><circle class="track" cx="16" cy="16" r="13"/><circle class="bar" cx="16" cy="16" r="13" pathLength="100" stroke-dasharray="100" stroke-dashoffset="100"/></svg>',
+      stack: '<svg viewBox="0 0 52 52" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round"><path d="M26 7 45 17 26 27 7 17Z"/><path d="m7 26 19 10 19-10M7 35l19 10 19-10" stroke-linecap="round"/></svg>',
+      offline: '<svg viewBox="0 0 52 52" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 20a29 29 0 0 1 40 0M13 28a19 19 0 0 1 26 0M20 35.5a9 9 0 0 1 12 0"/><circle cx="26" cy="42" r="1.6" fill="currentColor"/><path d="M8 8l36 36"/></svg>'
+    };
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+    const standalone = navigator.standalone === true || matchMedia("(display-mode: standalone)").matches;
+    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+    const store = {
+      get(key, fallback) { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch (_) { return fallback; } },
+      set(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) {} }
+    };
+
+    let toastTimer;
+    function toast(message) {
+      const element = $("toast");
+      element.textContent = message;
+      element.classList.add("show");
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => element.classList.remove("show"), 2600);
     }
+
+    // Large title collapses into a compact one, like a native navigation bar.
+    new IntersectionObserver(([entry]) => document.body.classList.toggle("scrolled", !entry.isIntersecting),
+      {rootMargin: "-40px 0px 0px 0px"}).observe($("title"));
+
+    /* Builds */
+    const list = $("list");
+    const rows = new Map();
+    const palettes = [["#ff9a7a", "#e4583a"], ["#6fcf8e", "#2e7d52"], ["#6cb4ff", "#2f6fe0"],
+                      ["#c29bff", "#7a4fe0"], ["#ffd06b", "#e8912f"], ["#5fd8cc", "#1e8f88"]];
+    let loaded = false;
+
+    function ago(seconds) {
+      const minutes = Math.floor((Date.now() / 1000 - seconds) / 60);
+      if (minutes < 1) return "Just now";
+      if (minutes < 60) return minutes + "m ago";
+      const hours = Math.floor(minutes / 60);
+      return hours < 24 ? hours + "h ago" : Math.floor(hours / 24) + "d ago";
+    }
+
+    function paintIcon(row) {
+      const {item, icon} = row;
+      if (item.icon) {
+        const src = base + "/" + item.icon;
+        if (icon.dataset.src === src) return;
+        icon.dataset.src = src;
+        icon.style.background = "var(--fill)";
+        const image = new Image();
+        image.alt = "";
+        image.onload = () => icon.replaceChildren(image);
+        image.src = src;
+        return;
+      }
+      if (icon.dataset.src === "") return;
+      icon.dataset.src = "";
+      const hash = [...item.project].reduce((sum, c) => (sum * 31 + c.charCodeAt(0)) >>> 0, 7);
+      const [from, to] = palettes[hash % palettes.length];
+      icon.style.background = `linear-gradient(160deg, ${from}, ${to})`;
+      icon.textContent = (item.title.trim()[0] || "?").toUpperCase();
+    }
+
+    function paint(row) {
+      const {item, state, detail, button} = row;
+      row.name.textContent = item.title;
+      paintIcon(row);
+      detail.classList.toggle("warn", state?.stage === "failed");
+      detail.textContent = state?.stage === "waiting" ? "Starting…"
+        : state?.stage === "downloading" ? "Downloading…"
+        : state?.stage === "done" ? "Finishing on this device…"
+        : state?.stage === "failed" ? state.message
+        : "Build " + item.version + " · " + ago(item.published_at);
+      const busy = state && state.stage !== "failed";
+      button.classList.toggle("busy", !!busy);
+      button.disabled = !!busy;
+      if (busy) {
+        const kind = state.stage === "downloading" ? "ring" : state.stage === "done" ? "check" : "spinner";
+        if (button.dataset.kind !== kind) { button.dataset.kind = kind; button.innerHTML = svg[kind]; }
+        const percent = Math.round(100 * (state.fraction || 0));
+        if (kind === "ring") button.querySelector(".bar").style.strokeDashoffset = String(100 - percent);
+        button.setAttribute("role", "progressbar");
+        button.setAttribute("aria-valuenow", String(percent));
+        button.setAttribute("aria-label", item.title + ": " + detail.textContent);
+        return;
+      }
+      button.removeAttribute("role");
+      button.removeAttribute("aria-valuenow");
+      button.dataset.kind = "label";
+      const installed = store.get("gala.installed", {})[item.project];
+      const label = !isIOS ? "Get IPA" : state ? "Retry" : installed === item.sha256 ? "Installed" : installed ? "Update" : "Install";
+      button.textContent = label;
+      button.classList.toggle("quiet", label === "Installed");
+      button.setAttribute("aria-label", (label === "Installed" ? "Reinstall " : label + " ") + item.title);
+    }
+
+    function createRow(item) {
+      const el = document.createElement("article");
+      el.className = "app";
+      el.innerHTML = '<span class="icon" aria-hidden="true"></span><div class="meta"><span class="name"></span><span class="detail"></span></div><button class="pill" type="button"></button>';
+      const row = {el, item, state: null, icon: el.querySelector(".icon"), name: el.querySelector(".name"),
+                   detail: el.querySelector(".detail"), button: el.querySelector(".pill")};
+      row.button.addEventListener("click", () => install(row));
+      return row;
+    }
+
+    function install(row) {
+      const {item} = row;
+      const project = encodeURIComponent(item.project);
+      if (!isIOS) {
+        location.href = `${base}/${project}/current.ipa?sha256=${item.sha256}`;
+        return;
+      }
+      const token = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, "0")).join("");
+      fetch(`${base}/${project}/attempt?attempt=${token}`, {method: "POST", keepalive: true}).catch(() => {});
+      // Navigate inside the tap: iOS ignores itms-services links opened after an await.
+      const manifest = `${location.origin}${base}/${project}/manifest.plist?sha256=${item.sha256}&attempt=${token}`;
+      location.href = "itms-services://?action=download-manifest&url=" + encodeURIComponent(manifest);
+      follow(row, token);
+    }
+
+    async function follow(row, token) {
+      const started = Date.now();
+      const project = encodeURIComponent(row.item.project);
+      const sha = row.item.sha256;
+      const current = () => row.state?.token === token;
+      row.state = {stage: "waiting", token};
+      paint(row);
+      let misses = 0;
+      while (current()) {
+        await sleep(document.hidden ? 1500 : 500);
+        if (!current()) return;
+        let status;
+        try {
+          const response = await fetch(`${base}/${project}/status.json?attempt=${token}`, {cache: "no-store"});
+          status = response.status === 404 ? {stage: "ready"} : await response.json();
+          misses = 0;
+        } catch (_) {
+          if (++misses < 6) continue;
+          row.state = {stage: "failed", token, message: "Lost connection to your Mac"};
+          paint(row);
+          return;
+        }
+        if (status.stage === "ready" || status.stage === "manifest") {
+          // No request usually means the iOS prompt was cancelled.
+          if (Date.now() - started > 45000) { row.state = null; paint(row); return; }
+        } else if (status.stage === "downloading") {
+          row.state = {stage: "downloading", token, fraction: status.sent / Math.max(1, status.total)};
+          paint(row);
+        } else if (status.stage === "transferred") {
+          store.set("gala.installed", {...store.get("gala.installed", {}), [row.item.project]: sha});
+          row.state = {stage: "done", token};
+          paint(row);
+          await sleep(4000);
+          if (current()) { row.state = null; paint(row); }
+          return;
+        } else if (status.stage === "interrupted") {
+          row.state = {stage: "failed", token, message: "Download interrupted"};
+          paint(row);
+          return;
+        } else if (status.stage === "superseded") {
+          row.state = null;
+          toast("A newer build is ready");
+          loadBuilds();
+          return;
+        }
+      }
+    }
+
+    function notice(kind) {
+      const empty = kind === "empty";
+      $("notice-icon").innerHTML = empty ? svg.stack : svg.offline;
+      $("notice-title").textContent = empty ? "No Builds" : "Can’t Reach Your Mac";
+      $("notice-text").innerHTML = empty
+        ? "Run <code>gala deliver</code> in a project and it will show up here."
+        : "Make sure Tailscale is connected on this device.";
+      $("notice-action").hidden = empty;
+      $("notice").hidden = false;
+    }
+
+    async function loadBuilds() {
+      let items;
+      try {
+        const response = await fetch(base + "/projects.json", {cache: "no-store"});
+        if (!response.ok) throw new Error();
+        items = await response.json();
+      } catch (_) {
+        if (!loaded) notice("offline");
+        return;
+      }
+      loaded = true;
+      const seen = new Set();
+      items.forEach((item, index) => {
+        seen.add(item.project);
+        let row = rows.get(item.project);
+        if (!row) { row = createRow(item); rows.set(item.project, row); }
+        row.item = item;
+        paint(row);
+        if (list.children[index] !== row.el) list.insertBefore(row.el, list.children[index] || null);
+      });
+      for (const [project, row] of rows) {
+        if (!seen.has(project)) { row.el.remove(); rows.delete(project); }
+      }
+      $("notice").hidden = true;
+      if (!items.length) notice("empty");
+    }
+
+    $("notice-action").addEventListener("click", loadBuilds);
+    loadBuilds();
+    setInterval(() => { if (!document.hidden) loadBuilds(); }, 10000);
+    setInterval(() => rows.forEach(row => { if (!row.state) paint(row); }), 30000);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) loadBuilds(); });
+
+    /* Build alerts */
+    let registration, vapidKey, alerts = "loading";
+    const bell = $("alerts");
+
     function keyBytes(encoded) {
       const padded = encoded.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(encoded.length / 4) * 4, "=");
       return Uint8Array.from(atob(padded), c => c.charCodeAt(0));
     }
-    async function ready() {
-      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-      const standalone = navigator.standalone === true || window.matchMedia("(display-mode: standalone)").matches;
-      if (isIOS && !standalone) {
-        document.getElementById("home-screen-guide").hidden = false;
-        button.hidden = true;
-        setState("SETUP");
-        return;
-      }
-      if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
-        setState("UNAVAILABLE", "error");
-        status.textContent = "This browser cannot receive build alerts.";
-        button.hidden = true;
-        return;
-      }
+
+    function paintAlerts() {
+      bell.innerHTML = alerts === "on" ? svg.bellOn : alerts === "blocked" || alerts === "unsupported" ? svg.bellOff : svg.bell;
+      bell.classList.toggle("on", alerts === "on");
+      const dismissed = store.get("gala.tip.dismissed", false);
+      const tip = alerts === "home-screen" ? ["Get build alerts", "Tap Share, then Add to Home Screen."]
+        : alerts === "off" ? ["Build alerts", "Get notified when a build is ready."] : null;
+      bell.classList.toggle("pending", !!tip && dismissed);
+      bell.setAttribute("aria-label", alerts === "on" ? "Build alerts are on" : "Build alerts");
+      $("tip").hidden = !tip || dismissed;
+      if (!tip) return;
+      $("tip-title").textContent = tip[0];
+      $("tip-text").textContent = tip[1];
+      $("tip-action").hidden = alerts !== "off";
+    }
+
+    async function prepareAlerts() {
+      if (isIOS && !standalone) { alerts = "home-screen"; return; }
+      if (!("serviceWorker" in navigator) || !("PushManager" in window)) { alerts = "unsupported"; return; }
       registration = await navigator.serviceWorker.register(base + "/sw.js", {scope: base + "/"});
       const response = await fetch(base + "/config.json", {cache: "no-store"});
-      if (!response.ok) throw new Error("Build alerts are temporarily unavailable.");
+      if (!response.ok) { alerts = "unsupported"; return; }
       vapidKey = keyBytes((await response.json()).publicKey);
-      if (Notification.permission === "granted" && await registration.pushManager.getSubscription()) {
-        setState("ON", "on");
-        button.hidden = true;
-        status.textContent = "Alerts are ready on this device.";
-      } else if (Notification.permission === "denied") {
-        setState("BLOCKED", "error");
-        button.hidden = true;
-        status.textContent = "Allow Gala notifications in this device’s settings to receive build alerts.";
-      } else {
-        setState("OFF");
-        button.disabled = false;
-      }
+      alerts = Notification.permission === "denied" ? "blocked"
+        : Notification.permission === "granted" && await registration.pushManager.getSubscription() ? "on" : "off";
     }
-    button.addEventListener("click", async () => {
+
+    async function enableAlerts() {
+      if (!registration || !vapidKey) { toast("Still loading. Try again in a moment."); return; }
       try {
-        if (!registration || !vapidKey) throw new Error("The page is still loading. Try again in a moment.");
-        button.disabled = true;
-        setState("SETTING UP");
         // Keep subscribe directly in the tap handler: iOS requires a user gesture.
-        const subscription = await registration.pushManager.subscribe({
-          userVisibleOnly: true, applicationServerKey: vapidKey
-        });
+        const subscription = await registration.pushManager.subscribe({userVisibleOnly: true, applicationServerKey: vapidKey});
         const response = await fetch(base + "/subscribe", {
           method: "POST", headers: {"Content-Type": "application/json"},
           body: JSON.stringify({subscription: subscription.toJSON(), device: navigator.userAgent})
         });
-        if (!response.ok) throw new Error("The Mac did not accept the subscription.");
-        setState("ON", "on");
-        button.hidden = true;
-        status.textContent = "Alerts are ready on this device.";
-      } catch (error) {
-        setState("NEEDS ATTENTION", "error");
-        status.textContent = "Could not enable alerts: " + error.message;
-        button.disabled = false;
+        if (!response.ok) throw new Error();
+        alerts = "on";
+        toast("Build alerts are on");
+      } catch (_) {
+        alerts = Notification.permission === "denied" ? "blocked" : "off";
+        toast(alerts === "blocked" ? "Notifications are off in Settings" : "Couldn’t turn on alerts");
       }
-    });
-    async function projects() {
-      try {
-        const response = await fetch(base + "/projects.json", {cache: "no-store"});
-        if (!response.ok) throw new Error("The Mac did not respond.");
-        const items = await response.json();
-        const holder = document.getElementById("projects");
-        holder.replaceChildren();
-        for (const item of items) {
-          const link = document.createElement("a");
-          link.className = "card app";
-          link.href = base + "/" + encodeURIComponent(item.project) + "/";
-          link.setAttribute("aria-label", "Open " + item.title + " build " + item.version);
-          const icon = document.createElement("span");
-          icon.className = "app-icon";
-          icon.textContent = (item.title.trim()[0] || "G").toUpperCase();
-          icon.setAttribute("aria-hidden", "true");
-          const copy = document.createElement("span");
-          copy.className = "app-copy";
-          const name = document.createElement("span");
-          name.className = "app-name";
-          name.textContent = item.title;
-          const detail = document.createElement("span");
-          detail.className = "app-detail";
-          detail.textContent = "Build " + item.version + " · Tap to install";
-          copy.append(name, detail);
-          const arrow = document.createElement("span");
-          arrow.className = "arrow";
-          arrow.textContent = "›";
-          arrow.setAttribute("aria-hidden", "true");
-          link.append(icon, copy, arrow);
-          holder.append(link);
-        }
-        document.getElementById("empty").hidden = items.length > 0;
-        document.getElementById("build-count").textContent = "02 / " + items.length + (items.length === 1 ? " BUILD" : " BUILDS");
-      } catch (error) {
-        document.getElementById("empty").hidden = false;
-        status.textContent = "Could not load builds: " + error.message;
-      }
+      paintAlerts();
     }
-    ready().catch(error => {
-      setState("NEEDS ATTENTION", "error");
-      status.textContent = error.message;
-      button.disabled = false;
+
+    bell.addEventListener("click", () => {
+      if (alerts === "off") return enableAlerts();
+      if (alerts === "home-screen") { store.set("gala.tip.dismissed", false); paintAlerts(); return; }
+      toast({on: "Build alerts are on", blocked: "Allow Gala notifications in Settings",
+             unsupported: "This browser can’t show build alerts", loading: "Checking alerts…"}[alerts]);
     });
-    projects();
-    document.addEventListener("visibilitychange", () => { if (!document.hidden) projects(); });
+    $("tip-action").addEventListener("click", enableAlerts);
+    $("tip-close").innerHTML = svg.close;
+    $("tip-close").addEventListener("click", () => { store.set("gala.tip.dismissed", true); paintAlerts(); });
+    document.querySelector(".tip-icon").innerHTML = svg.bell;
+    paintAlerts();
+    prepareAlerts().catch(() => { alerts = "unsupported"; }).finally(paintAlerts);
   </script>
 </body>
 </html>
