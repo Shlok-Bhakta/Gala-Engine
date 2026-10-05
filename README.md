@@ -215,7 +215,7 @@ chmod 600 /Volumes/BlenderBuild/gala-engine/apns/*.pem
 
 Install `mac/apns.js` beside the worker's `service.py` and restart the worker after updating it. The sender uses Node's built-in HTTP/2 support and the same Node executable as Web Push. In the native app's Settings, tap **Enable Build Alerts**. The Mac stores tokens in `apns-subscriptions.json` with owner-only permissions and records send counts and failure reasons in `apns-status.json`. It selects sandbox or production APNs from each device's signed provisioning profile and removes rejected device tokens. Native APNs and Web Push run independently; a push failure does not roll back a successful delivery.
 
-The 48-hour delivery lifetime also controls the native app's list. Expired deliveries are hidden immediately and their IPA, metadata, and icon are deleted by hourly cleanup. Starting another build or test for the same project clears its previous delivery before the new run, so a failed run or an unsigned build can also leave that project absent from the list. Build caches and apps already installed on devices remain. Delivering the project again adds its current build back to Gala.
+The 48-hour delivery lifetime also controls the native app's list. Expired deliveries are hidden immediately and their IPA, metadata, and icon are deleted by hourly cleanup. Starting another build for the same project clears its previous delivery before the new run, so a failed build or an unsigned build can leave that project absent from the list. Tests and `gala exec` keep the current delivery available. Build caches and apps already installed on devices remain. Delivering the project again adds its current build back to Gala.
 
 ## Pair and deploy from the ThinkPad
 

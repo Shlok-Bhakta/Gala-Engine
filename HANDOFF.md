@@ -1,6 +1,6 @@
 # Gala Engine handoff, 2026-10-04
 
-Another agent used Gala from Linux and filed six complaints. This session fixed five of them, the sixth was dropped on purpose (see below), and it also added a build queue, Mac cleanup, and a code review pass. Nothing is committed yet.
+Another agent used Gala from Linux and filed six complaints. This session fixed five of them, the sixth was dropped on purpose (see below), and it also added a build queue, Mac cleanup, and a code review pass. That work and the follow-through are now committed and pushed in `fdaacfc` on `main`.
 
 ## Follow-up: delivery of an existing IPA
 
@@ -14,24 +14,24 @@ The owner asked for agents to control their own build cycle and use Gala only fo
 - Validation delivery: `https://shloks-macbook-air.taildb44.ts.net/gala/uikithello-existing-ipa-validation/`. Detailed result: `/Volumes/BlenderBuild/gala-engine/existing-ipa-validation-result.json`. This is an ordinary delivery and expires after 48 hours.
 - Updated the README and `~/.agents/skills/gala-engine/SKILL.md` with the existing-IPA workflow. The skill now requires documenting Gala behavior changes and syncing the changed skill to crabcake, checking hashes, and recording offline clients here. The skill validator passed on crabcake.
 - Copied the changed CLI, README, publish and queue tests, and this handoff to crabcake. Synced the Gala skill to crabcake and kiwi, with matching SHA-256 hashes. The Mac CLI symlink already points to this checkout. ThinkPad timed out over SSH and still needs the updated CLI and skill when online.
-- These changes use the existing worker API and signing path, so the running Mac service needed no restart. Its service.py snapshot still contains the prior CLI code; copy the current `bin/gala` there when doing the next service deployment. The earlier handoff work and this follow-up remain uncommitted. Do not reset crabcake's uncommitted checkout while syncing updates.
+- These changes use the existing worker API and signing path, so the running Mac service needed no restart. Its service.py snapshot still contains the prior CLI code; copy the current `bin/gala` there when doing the next service deployment. This section records the earlier follow-up. It is now committed along with the handoff follow-through. Crabcake's previous copied changes are preserved in a named stash.
 
 ## Handoff follow-through
 
 The owner asked to continue the older next steps as well as the existing-IPA request.
 
 - Added the simulator and helper reaper to startup and hourly housekeeping. `SIMULATOR_MAX_AGE` is 12 hours. It uses simctl's `lastBootedAt`, with persisted first-observation fallback. A queue lock prevents a Gala job starting during cleanup, and publishing also prevents cleanup. Old orphaned helpers must have unchanged CPU usage between checks, belong to this user, have no live children, and still match their original PID/start time before termination. Includes Xcode's newer `SWBBuildService` name. Every action is logged; cleanup errors do not stop the worker.
-- Deployed the reaper and observed it shut down the two old simulators and close Simulator.app. The Mac's internal free space rose to 53 GB. The refreshed doctor and UIKitHello build passed.
+- Deployed the reaper and observed it shut down the two old simulators and close Simulator.app. The Mac's internal free space rose to 53 GB. The refreshed doctor and UIKitHello build passed. After the final worker deployment, doctor and UIKitHello passed again. Crabcake verified publishing, the dashboard list, the OTA manifest, the signed IPA HTTPS download and checksum, and completed transfer status through the refactored installer. The running worker matches the repository CLI byte for byte.
 - Tried launchd with external stdout/stderr, which failed with EX_CONFIG. Tried a local diagnostic log, which let Python start, but a process sample showed it hanging in `open` while reading the USB `service.py`. The TCC entry still names an older Homebrew Python version. Requested Full Disk Access for `/opt/homebrew/bin/python3` from the owner. Restored the manual service while that setting is pending. The plist keeps `/dev/null` for startup; Python now redirects its own stdout/stderr to external `service.log` after checking volume access. Pending retry after the setting changes.
 - Removed repeated installer expiry logic, extracted project-list/manifest/file-streaming helpers, and cached Tailscale DNS for 60 seconds. Legacy `/build` and `/test` endpoints and `build.lock` stay until ThinkPad is updated, as the older handoff requires.
 - Updated the recipes in MB-Notes, MB-Document-Scanner, MB-converter, MB-converter-feature-block, MB-Music-Tools, MB-Rice, QR-Scanner, d-zero, and keyboard-test. Xcodebuild package caches now stay beside Gala's DerivedData on the external volume. Gala-only recipes require `GALA_BUILD_DIR` instead of falling back to internal scratch. Notes and Document Scanner create temporary iPhone simulators and shut down/delete them on success, failure, or a handled signal. QR Scanner's archive script still supports CI without Gala and places the package cache beside its selected DerivedData.
-- All 12 changed recipe files passed shell syntax checks. Temporary-device cleanup and preservation of xcodebuild's exit status passed with statuses 0 and 7 for both Notes and Document Scanner. The real Document Scanner Gala test passed in 106.6 seconds. Notes and the native Gala gated build are still being verified.
-- Current repo checks pass 34 Python tests and 4 Node APNs tests. Worker tests now close recipe stdout pipes, eliminating the earlier ResourceWarnings. The updated Gala skill documents worker upkeep, recipes, upgrade precautions, and skill synchronization, and has been synced to crabcake and kiwi.
+- All 12 changed recipe files passed shell syntax checks. Temporary-device cleanup and preservation of xcodebuild's exit status passed with statuses 0 and 7 for both Notes and Document Scanner. The real Document Scanner Gala test passed in 106.6 seconds. Native Gala passed its typecheck/bundle gate and built an unsigned device IPA. The extra full Notes validation was cancelled after about 14 minutes in the compiler, with no compiler diagnostic. Its temporary simulator was deleted, and the command recorded cancellation as exit code 130. Notes full app tests remain unverified; simulator lifecycle and shell syntax checks passed.
+- Current repo checks pass 34 Python tests and 4 Node APNs tests. Worker tests now close recipe stdout pipes, eliminating the earlier ResourceWarnings. Crabcake pulled `fdaacfc` with a clean checkout and also passed all 34 Python tests. Its prior copied work is saved as `stash@{0}`, named `gala-handoff-before-clean-sync-2026-10-04`. The updated Gala skill documents worker upkeep, recipes, upgrade precautions, and skill synchronization. Its SHA-256 matches on this Mac, crabcake, and kiwi. The skill validator passed.
 - App recipe edits are in their own local checkouts. Several recipes are ignored local configuration; other app source changes were preserved. Do not commit or reset unrelated app work.
 
 ## What changed
 
-All of this is in `bin/gala`. It is deployed as `/Volumes/BlenderBuild/gala-engine/service.py`, and the running service has the latest copy.
+Most worker and CLI changes are in `bin/gala`. The current snapshot is deployed as `/Volumes/BlenderBuild/gala-engine/service.py`. The worker runs manually until macOS access is fixed for launchd.
 
 - **Build queue.** The Mac runs one job at a time across every project and client, because it has 8 GB of RAM. Clients print their queue position and what is ahead of them, then stream the log live. `gala queue` shows what is running. Ctrl-C or killing the client cancels its job. If a client vanishes, the Mac drops its queued job after 2 minutes and stops its running job after 5.
 - **Timings and `--json`.** Every project command ends with a timing line for prepare, sync, queue, test, build, fetch, and publish. With `--json`, stdout is a single object and progress goes to stderr. That object is also saved to `.gala/last-result.json`.
@@ -64,7 +64,7 @@ All of this is in `bin/gala`. It is deployed as `/Volumes/BlenderBuild/gala-engi
 | Machine | CLI | Skill |
 |---|---|---|
 | Mac | `~/.local/bin/gala` is a symlink to this repo | updated |
-| crabcake | the changed files are copied into `~/Projects/Gala-Engine`, which shows them as uncommitted | updated |
+| crabcake | clean `main` checkout updated by `git pull --ff-only`; earlier copied work preserved in stash | updated |
 | kiwi | no CLI | updated |
 | ThinkPad | old version; it was off | not updated |
 
@@ -108,7 +108,7 @@ Gala's own data is on the external drive. Internal-disk use from Gala now comes 
 ## Remaining steps
 
 1. Enable Full Disk Access for the current Homebrew Python, then finish launchd migration. When Gala's queue is empty, stop the manual service, copy the current `bin/gala` to `/Volumes/BlenderBuild/gala-engine/service.py`, and bootstrap `~/Library/LaunchAgents/com.gala.engine.plist`. Verify actual worker health with `gala doctor` and a UIKitHello build; a loaded job is insufficient. Python opens the external service log itself.
-2. Finish recording the Notes and native Gala validation results, commit/push this Gala checkout, and bring crabcake to the resulting commit. Preserve its copied work in a named stash before pulling rather than resetting uncommitted files.
+2. Notes full app tests remain unverified after the extra validation compile was cancelled. Its simulator cleanup was verified, and Document Scanner passed the real simulator test. Native Gala passed its gate and unsigned build. The implementation is pushed and crabcake is clean.
 3. ThinkPad is still offline. Update its Gala CLI and skill when reachable, then remove the legacy `/build` and `/test` API and the unused `build.lock` file.
 4. Before the macOS, Xcode, and SDK upgrade, download and expand the Xcode `.xip` on the external drive. After upgrading, remove the old unused simulator dyld cache `/Library/Developer/CoreSimulator/Caches/dyld/25F80`, re-run `xcodebuild -downloadComponent MetalToolchain`, add the desired iPhone simulator runtime, and run `gala doctor`. No operating-system or SDK upgrade was requested in this follow-through.
 5. Native push remains intentionally deferred. Regenerate the explicit `com.galaengine.app` profile with the current development certificate only when returning to native notifications. The owner's current notification path is the Home Screen web app.
